@@ -1,5 +1,6 @@
 __pycache__/
+ckpts/
 data/
-checkpoints/
+wandb/
 config_recog.yaml
 data.zip

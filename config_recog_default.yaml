@@ -1,38 +1,43 @@
+general:
+  seed: 42
+
+wandb:
+  api_key: "your_wandb_api_key_here"   # paste your key from wandb.ai/settings
+  project: "ViTUnified"
+
 model:
-  model_name: "vit_small_patch16_224"   # timm model name
-  pretrained: true                       # ImageNet pre-trained weights
-  in_channels: 3                         # RGB input
-  num_classes_pad: 2                     # kept for model compat; not used in recog loss
+  model_name: "vit_small_patch16_224"
+  pretrained: true
+  num_classes: 2
+  pad_dropout: 0.0
 
 loss:
-  # embedding_dim is inferred from model.embed_dim at runtime (384 for ViT-Small)
-  margin: 0.5                            # ArcFace angular margin (radians)
-  scale: 30.0                            # ArcFace logit scale
+  margin: 0.5
+  scale: 30.0
 
 optimizer:
-  lr: 1.0e-4                             # initial learning rate
-  weight_decay: 2.0e-5                   # AdamW weight decay
+  lr: 1.0e-4
+  weight_decay: 2.0e-5
 
 scheduler:
-  power: 3                               # polynomial decay exponent
-  min_lr: 1.0e-5                         # learning rate floor
+  power: 3
+  min_lr: 1.0e-5
 
 training:
   epochs: 100
   batch_size: 256
   num_workers: 4
   pin_memory: true
-  checkpoint_interval: 20               # periodic checkpoint every N epochs
-  seed: 42
+  checkpoint_interval: 20
 
 data:
   data_root: "data/"
   datasets: ["fvc", "sd302"]
   splits: "data/splits.json"
-  split_ratio: [0.7, 0.15, 0.15]
-  image_size: 224
-  n_genuine_impressions: 8
+  n_genuine_impressions: 3
   n_impostor_impressions: 1
+  impostor_mode: "sub"
+  n_impostor_subset: 20
 
 output:
   checkpoint_dir: "ckpts/recog/"

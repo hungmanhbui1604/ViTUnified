@@ -1,108 +1,76 @@
+import timm
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from typing import Optional, List, Tuple
-import timm
 
 
-class ViTUnified(nn.Module):    
+class PADHead(nn.Module):
+    def __init__(self, dim: int, num_classes: int = 2, dropout: float = 0.0):
+        super().__init__()
+
+        hidden = dim // 2
+        self.head = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, num_classes),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        cls_token = x[:, 0]  # (B, D)
+        return self.head(cls_token)
+
+
+class ViTUnified(nn.Module):
     def __init__(
         self,
         model_name: str = "vit_small_patch16_224",
         pretrained: bool = True,
-        in_channels: int = 3,
-        num_classes_pad: int = 2,
-        **kwargs
+        num_classes: int = 2,
+        pad_dropout: float = 0.0,
     ):
         super().__init__()
-        # Load the base model without the final classification head (num_classes=0)
-        self.model = timm.create_model(
-            model_name,
-            pretrained=pretrained,
-            in_chans=in_channels,
-            num_classes=0,
-            **kwargs
+
+        self.backbone = timm.create_model(model_name, pretrained=pretrained)
+        self.backbone.reset_classifier(0)
+
+        self.embed_dim = self.backbone.embed_dim
+        self.num_layers = len(self.backbone.blocks)
+
+        self.pad_heads = nn.ModuleList(
+            [
+                PADHead(self.embed_dim, num_classes, pad_dropout)
+                for _ in range(self.num_layers)
+            ]
         )
-        self.embed_dim = self.model.num_features
-        self.num_blocks = len(self.model.blocks)
-        
-        # PAD classifier heads after each transformer layer (block)
-        self.pad_heads = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(self.embed_dim, self.embed_dim // 2),
-                nn.ReLU(),
-                nn.Linear(self.embed_dim // 2, num_classes_pad)
-            ) for _ in range(self.num_blocks)
-        ])
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, List[torch.Tensor]]:
-        """
-        Forward pass returning final embedding and a list of PAD logits from each layer.
-        """
-        # Standard ViT forward path but intercepting each block's output
-        x = self.model.patch_embed(x)
-        x = self.model._pos_embed(x)
-        
-        if hasattr(self.model, 'patch_drop'):
-            x = self.model.patch_drop(x)
-        if hasattr(self.model, 'norm_pre'):
-            x = self.model.norm_pre(x)
-        
+    def forward(self, x: torch.Tensor):
+        # Patch embedding
+        x = self.backbone.patch_embed(x)
+
+        # Patch embedding
+        cls_token = self.backbone.cls_token.expand(x.shape[0], -1, -1)
+        x = torch.cat((cls_token, x), dim=1)
+
+        # Positional embedding
+        x = x + self.backbone.pos_embed
+        x = self.backbone.pos_drop(x)
+
+        # Transformer blocks
+        x = self.backbone.norm_pre(x)
+
         pad_outputs = []
-        for i, block in enumerate(self.model.blocks):
+        for i, block in enumerate(self.backbone.blocks):
             x = block(x)
-            # Use CLS token (index 0) for intermediate PAD classification
-            cls_token = x[:, 0]
-            pad_outputs.append(self.pad_heads[i](cls_token))
-            
-        x = self.model.norm(x)
-        # Final CLS representation (features)
-        final_embedding = self.model.forward_head(x, pre_logits=True)
-        
+            logits = self.pad_heads[i](x)
+            pad_outputs.append(logits)
+
+        # Final embedding
+        x = self.backbone.norm(x)
+        final_embedding = x[:, 0]
+
         return final_embedding, pad_outputs
-    
-    def extract_features(self, x: torch.Tensor) -> torch.Tensor:
-        """Extract only the final feature embeddings (CLS token)."""
-        features = self.model.forward_features(x)
-        return self.model.forward_head(features, pre_logits=True)
 
-
-def vit_small_unified(pretrained: bool = True, num_classes_pad: int = 2, **kwargs) -> ViTUnified:
-    """Create a small unified ViT (ViT-Small/16) with PAD heads."""
-    return ViTUnified(
-        model_name="vit_small_patch16_224", 
-        pretrained=pretrained, 
-        num_classes_pad=num_classes_pad, 
-        **kwargs
-    )
-
-
-if __name__ == "__main__":
-    from loss import ArcFaceHead
-    
-    try:
-        model = vit_small_unified(pretrained=True)
-        print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
-        
-        # Forward pass
-        x = torch.randn(4, 3, 224, 224)
-        embedding, pad_logits = model(x)
-        
-        print(f"Input shape: {x.shape}")
-        print(f"Final embedding shape: {embedding.shape}")
-        print(f"Number of PAD heads: {len(pad_logits)}")
-        print(f"PAD logit shape (from head 0): {pad_logits[0].shape}")
-        
-        # Test feature extraction
-        features = model.extract_features(x)
-        print(f"Extracted feature shape: {features.shape}")
-        
-        # Test ArcFace head
-        arcface = ArcFaceHead(embedding_dim=model.embed_dim, num_identities=100)
-        logits = arcface(features)
-        print(f"ArcFace logits shape: {logits.shape}")
-
-    except Exception as e:
-        print(f"Error during testing: {e}")
-        import traceback
-        traceback.print_exc()
+    def feature_extraction(self, x: torch.Tensor) -> torch.Tensor:
+        final_embedding, _ = self.forward(x)
+        return final_embedding
