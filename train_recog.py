@@ -4,22 +4,48 @@ import random
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 import yaml
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
+from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
 import wandb
 from data import (
     RecogEvaluationDataset,
     RecogTrainingDataset,
-    create_dataloaders,
     unify_recog_splits,
 )
 from loss import ArcFaceLoss
 from model import ViTUnified
 from transforms import get_transforms
+
+
+# ────────────────────────────────────────────────────────────
+#  DDP helpers
+# ────────────────────────────────────────────────────────────
+
+
+def setup_ddp() -> tuple[int, int]:
+    """Initialise NCCL process group. Returns (local_rank, world_size)."""
+    dist.init_process_group(backend="nccl")
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
+    return local_rank, dist.get_world_size()
+
+
+def cleanup_ddp() -> None:
+    dist.destroy_process_group()
+
+
+def is_main() -> bool:
+    """True only on rank-0 (or when DDP is not active)."""
+    return not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0
+
 
 # ────────────────────────────────────────────────────────────
 #  Helpers
@@ -45,9 +71,7 @@ def make_polynomial_scheduler(
     lr_min: float,
     power: float,
 ) -> LambdaLR:
-    """
-    lr(t) = (lr_start - lr_min) * (1 - t / total_steps) ** power + lr_min
-    """
+    """lr(t) = (lr_start - lr_min) * (1 - t / total_steps) ** power + lr_min"""
 
     def _lr_lambda(current_step: int) -> float:
         if current_step >= total_steps:
@@ -73,9 +97,7 @@ def compute_eer(scores: np.ndarray, labels: np.ndarray) -> tuple[float, float]:
     best_thr = thresholds[0]
 
     for thr in thresholds:
-        # FAR: impostors accepted (score >= thr)
         far = (impostor_scores >= thr).mean()
-        # FRR: genuines rejected (score < thr)
         frr = (genuine_scores < thr).mean()
         diff = abs(far - frr)
         if diff < min_diff:
@@ -87,21 +109,27 @@ def compute_eer(scores: np.ndarray, labels: np.ndarray) -> tuple[float, float]:
 
 
 # ──────────────────────────────────────────────────────────────
-#  Evaluation loop
+#  Evaluation loop  (runs on every rank; only rank-0 computes EER)
 # ──────────────────────────────────────────────────────────────
 
 
 @torch.no_grad()
 def evaluate(
-    model: ViTUnified,
-    val_loader: torch.utils.data.DataLoader,
+    model: DDP,
+    val_loader: DataLoader,
     device: torch.device,
     epoch: int,
 ) -> tuple[float, float]:
     model.eval()
     all_scores, all_labels = [], []
 
-    pbar = tqdm(val_loader, desc=f"Epoch {epoch:03d} [val]", leave=False, unit="batch")
+    pbar = tqdm(
+        val_loader,
+        desc=f"Epoch {epoch:03d} [val]",
+        leave=False,
+        unit="batch",
+        disable=not is_main(),   # only show progress bar on rank-0
+    )
     for img_a, img_b, labels in pbar:
         img_a = img_a.to(device, non_blocking=True)
         img_b = img_b.to(device, non_blocking=True)
@@ -123,15 +151,20 @@ def evaluate(
 
 
 # ──────────────────────────────────────────────────────────────
-#  Checkpoint helpers
+#  Checkpoint helpers  (rank-0 only)
 # ──────────────────────────────────────────────────────────────
+
+
+def _unwrap(module):
+    """Return the underlying module regardless of DDP wrapping."""
+    return module.module if isinstance(module, DDP) else module
 
 
 def save_checkpoint(
     path: str,
     epoch: int,
-    model: ViTUnified,
-    arcface_loss: ArcFaceLoss,
+    model: DDP,
+    arcface_loss: DDP,
     optimizer: AdamW,
     scheduler: LambdaLR,
     best_eer: float,
@@ -140,8 +173,8 @@ def save_checkpoint(
     torch.save(
         {
             "epoch": epoch,
-            "model": model.state_dict(),
-            "arcface": arcface_loss.state_dict(),
+            "model": _unwrap(model).state_dict(),
+            "arcface": _unwrap(arcface_loss).state_dict(),
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
             "best_eer": best_eer,
@@ -165,8 +198,8 @@ def save_best(
     ckpt_dir: str,
     best_name: str,
     epoch: int,
-    model: ViTUnified,
-    arcface_loss: ArcFaceLoss,
+    model: DDP,
+    arcface_loss: DDP,
     eer: float,
     use_wandb: bool = True,
 ) -> None:
@@ -174,8 +207,8 @@ def save_best(
     torch.save(
         {
             "epoch": epoch,
-            "model": model.state_dict(),
-            "arcface": arcface_loss.state_dict(),
+            "model": _unwrap(model).state_dict(),
+            "arcface": _unwrap(arcface_loss).state_dict(),
             "eer": eer,
         },
         path,
@@ -190,8 +223,6 @@ def save_best(
         )
         artifact.add_file(path)
         wandb.log_artifact(artifact)
-
-        # Keep the run summary always reflecting the best EER seen so far
         wandb.run.summary["best_val_eer"] = eer
         wandb.run.summary["best_val_eer_epoch"] = epoch
         tqdm.write("  [wandb] best-model artifact logged")
@@ -203,9 +234,10 @@ def save_best(
 
 
 def train_one_epoch(
-    model: ViTUnified,
-    arcface_loss: ArcFaceLoss,
-    train_loader: torch.utils.data.DataLoader,
+    model: DDP,
+    arcface_loss: DDP,
+    train_loader: DataLoader,
+    train_sampler: DistributedSampler,
     optimizer: AdamW,
     scheduler: LambdaLR,
     device: torch.device,
@@ -216,18 +248,23 @@ def train_one_epoch(
     model.train()
     arcface_loss.train()
 
+    # DistributedSampler must be re-seeded each epoch for proper shuffling
+    train_sampler.set_epoch(epoch)
+
     total_loss = 0.0
     pbar = tqdm(
-        train_loader, desc=f"Epoch {epoch:03d} [train]", leave=False, unit="batch"
+        train_loader,
+        desc=f"Epoch {epoch:03d} [train]",
+        leave=False,
+        unit="batch",
+        disable=not is_main(),
     )
 
     for images, labels in pbar:
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
 
-        # Forward – only use the final embedding for recognition
         embeddings, _pad_logits = model(images)
-
         loss, _ = arcface_loss(embeddings, labels)
 
         optimizer.zero_grad()
@@ -246,13 +283,9 @@ def train_one_epoch(
 
         pbar.set_postfix(loss=f"{loss_val:.4f}", lr=f"{lr_val:.2e}")
 
-        # ── per-step wandb log ──────────────────────────────────────────
-        if use_wandb and wandb.run is not None:
+        if use_wandb and is_main() and wandb.run is not None:
             wandb.log(
-                {
-                    "train/loss_step": loss_val,
-                    "train/lr": lr_val,
-                },
+                {"train/loss_step": loss_val, "train/lr": lr_val},
                 step=global_step,
             )
 
@@ -265,20 +298,24 @@ def train_one_epoch(
 
 
 def main(cfg: dict, use_wandb: bool = True) -> None:
-    general_cfg = cfg["general"]
-    data_cfg = cfg["data"]
-    model_cfg = cfg["model"]
+    # ── DDP init ────────────────────────────────────────────────────────────
+    local_rank, world_size = setup_ddp()
+    device = torch.device(f"cuda:{local_rank}")
+
+    general_cfg  = cfg["general"]
+    data_cfg     = cfg["data"]
+    model_cfg    = cfg["model"]
     training_cfg = cfg["training"]
-    loss_cfg = cfg["loss"]
-    opt_cfg = cfg["optimizer"]
-    sched_cfg = cfg["scheduler"]
-    output_cfg = cfg["output"]
+    loss_cfg     = cfg["loss"]
+    opt_cfg      = cfg["optimizer"]
+    sched_cfg    = cfg["scheduler"]
+    output_cfg   = cfg["output"]
 
-    set_seed(general_cfg["seed"])
+    set_seed(general_cfg["seed"] + local_rank)  # unique seed per rank
 
-    # ────────── wandb login & init ──────────────────────────────────────────
+    # ── wandb (rank-0 only) ─────────────────────────────────────────────────
     wandb_cfg = cfg.get("wandb", {})
-    if use_wandb:
+    if use_wandb and is_main():
         api_key = wandb_cfg.get("api_key")
         if not api_key or api_key == "your_wandb_api_key_here":
             raise ValueError(
@@ -286,7 +323,6 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
                 "Add your key to config_recog.yaml or pass --no-wandb to skip."
             )
         wandb.login(key=api_key)
-
         wandb.init(
             project=wandb_cfg.get("project", "fingerprint-recognition"),
             config=cfg,
@@ -294,29 +330,30 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
         )
         tqdm.write(f"[wandb] run: {wandb.run.url}")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
+    if is_main():
+        print(f"Device: {device}  |  world_size: {world_size}")
 
     ckpt_dir = output_cfg["checkpoint_dir"]
-    os.makedirs(ckpt_dir, exist_ok=True)
+    if is_main():
+        os.makedirs(ckpt_dir, exist_ok=True)
 
-    # ────────── transforms ──────────────────────────────────────────────────
+    # ── transforms ──────────────────────────────────────────────────────────
     train_transform, eval_transform = get_transforms("all")
 
-    # ────────── datasets & dataloaders ──────────────────────────────────────
-    if not os.path.exists(data_cfg["splits"]):
+    # ── splits (rank-0 creates them, others wait) ────────────────────────────
+    if is_main() and not os.path.exists(data_cfg["splits"]):
         unify_recog_splits(
             data_root=data_cfg["data_root"],
             datasets=data_cfg["datasets"],
             output_path=data_cfg["splits"],
         )
+    dist.barrier()  # all ranks wait until splits file exists
 
+    # ── datasets ─────────────────────────────────────────────────────────────
     train_dataset = RecogTrainingDataset(
         json_path=data_cfg["splits"],
         transform=train_transform,
     )
-    print(f"\n{train_dataset}")
-
     val_dataset = RecogEvaluationDataset(
         json_path=data_cfg["splits"],
         split="val",
@@ -327,48 +364,73 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
         transform=eval_transform,
         seed=general_cfg["seed"],
     )
-    print(f"{val_dataset}")
 
-    # Log dataset sizes as wandb summary stats
-    if use_wandb and wandb.run is not None:
+    if is_main():
+        print(f"\n{train_dataset}")
+        print(f"{val_dataset}")
+
+    # ── dataloaders ───────────────────────────────────────────────────────────
+    # Training: each GPU sees a non-overlapping shard via DistributedSampler
+    train_sampler = DistributedSampler(
+        train_dataset,
+        num_replicas=world_size,
+        rank=local_rank,
+        shuffle=True,
+        seed=general_cfg["seed"],
+    )
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=training_cfg["batch_size"],   # per-GPU batch size
+        sampler=train_sampler,                   # replaces shuffle=True
+        num_workers=training_cfg["num_workers"],
+        pin_memory=training_cfg["pin_memory"],
+    )
+
+    # Validation: every rank runs the full val set (results identical across ranks)
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=training_cfg["batch_size"],
+        shuffle=False,
+        num_workers=training_cfg["num_workers"],
+        pin_memory=training_cfg["pin_memory"],
+    )
+
+    if use_wandb and is_main() and wandb.run is not None:
         wandb.run.summary.update(
             {
                 "dataset/train_samples": len(train_dataset),
                 "dataset/train_ids": len(train_dataset.key_to_label),
                 "dataset/val_pairs": len(val_dataset),
+                "training/world_size": world_size,
+                "training/per_gpu_batch": training_cfg["batch_size"],
+                "training/effective_batch": training_cfg["batch_size"] * world_size,
             }
         )
 
-    train_loader, val_loader = create_dataloaders(
-        train_dataset=train_dataset,
-        val_dataset=val_dataset,
-        batch_size=training_cfg["batch_size"],
-        num_workers=training_cfg["num_workers"],
-        pin_memory=training_cfg["pin_memory"],
-    )
-
-    # ────────── model ──────────────────────────────────────────────────
+    # ── model ─────────────────────────────────────────────────────────────────
     model = ViTUnified(
         model_name=model_cfg["model_name"],
         pretrained=model_cfg["pretrained"],
         num_classes=model_cfg["num_classes"],
         pad_dropout=model_cfg["pad_dropout"],
     ).to(device)
+    model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
-    if use_wandb and wandb.run is not None:
+    if use_wandb and is_main() and wandb.run is not None:
         wandb.watch(model, log="gradients", log_freq=100)
 
-    # ────────── loss ──────────────────────────────────────────────────
-    num_ids = len(train_dataset.key_to_label)
-    embed_dim = model.embed_dim
+    # ── loss ──────────────────────────────────────────────────────────────────
+    num_ids   = len(train_dataset.key_to_label)
+    embed_dim = _unwrap(model).embed_dim
     arcface_loss = ArcFaceLoss(
         embed_dim=embed_dim,
         num_classes=num_ids,
         margin=loss_cfg["margin"],
         scale=loss_cfg["scale"],
     ).to(device)
+    arcface_loss = DDP(arcface_loss, device_ids=[local_rank], output_device=local_rank)
 
-    # ────────── optimizer & scheduler ──────────────────────────────────
+    # ── optimizer & scheduler ─────────────────────────────────────────────────
     optimizer = AdamW(
         list(model.parameters()) + list(arcface_loss.parameters()),
         lr=opt_cfg["lr"],
@@ -384,24 +446,30 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
         power=sched_cfg["power"],
     )
 
-    # ────────── training ──────────────────────────────────────────────
-    best_eer = float("inf")
+    # ── training loop ─────────────────────────────────────────────────────────
+    best_eer      = float("inf")
     ckpt_interval = training_cfg["checkpoint_interval"]
     best_model_name = output_cfg["best_model_name"]
-    global_step = 0
+    global_step   = 0
 
-    print("\n" + "=" * 60)
-    print("Starting training")
-    print("=" * 60)
+    if is_main():
+        print("\n" + "=" * 60)
+        print(f"Starting training  (GPUs: {world_size}  |  "
+              f"effective batch: {training_cfg['batch_size'] * world_size})")
+        print("=" * 60)
 
     epoch_pbar = tqdm(
-        range(1, training_cfg["epochs"] + 1), desc="Training", unit="epoch"
+        range(1, training_cfg["epochs"] + 1),
+        desc="Training",
+        unit="epoch",
+        disable=not is_main(),
     )
     for epoch in epoch_pbar:
         avg_loss, global_step = train_one_epoch(
             model,
             arcface_loss,
             train_loader,
+            train_sampler,
             optimizer,
             scheduler,
             device,
@@ -410,61 +478,51 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
             use_wandb,
         )
 
+        # Synchronise all ranks before evaluation
+        dist.barrier()
+
         eer, thr = evaluate(model, val_loader, device, epoch)
 
-        epoch_pbar.set_postfix(
-            loss=f"{avg_loss:.4f}", eer=f"{eer:.4f}", thr=f"{thr:.4f}"
-        )
-        tqdm.write(
-            f"Epoch {epoch:03d} | avg loss: {avg_loss:.4f} | "
-            f"val EER: {eer:.4f}  (threshold={thr:.4f})"
-        )
+        if is_main():
+            epoch_pbar.set_postfix(
+                loss=f"{avg_loss:.4f}", eer=f"{eer:.4f}", thr=f"{thr:.4f}"
+            )
+            tqdm.write(
+                f"Epoch {epoch:03d} | avg loss: {avg_loss:.4f} | "
+                f"val EER: {eer:.4f}  (threshold={thr:.4f})"
+            )
 
-        # ── per-epoch wandb log ─────────────────────────────────────────
+            if use_wandb and wandb.run is not None:
+                wandb.log(
+                    {
+                        "train/loss_epoch": avg_loss,
+                        "val/eer": eer,
+                        "val/threshold": thr,
+                        "epoch": epoch,
+                    },
+                    step=global_step,
+                )
+
+            if eer < best_eer:
+                best_eer = eer
+                save_best(ckpt_dir, best_model_name, epoch, model, arcface_loss, eer, use_wandb)
+
+            if epoch % ckpt_interval == 0:
+                ckpt_path = os.path.join(ckpt_dir, f"checkpoint_epoch{epoch:03d}.pth")
+                save_checkpoint(ckpt_path, epoch, model, arcface_loss, optimizer, scheduler, best_eer, use_wandb)
+
+        # All ranks wait for rank-0 to finish saving before next epoch
+        dist.barrier()
+
+    if is_main():
+        print("=" * 60)
+        print(f"Training complete. Best val EER: {best_eer:.4f}")
+        print("=" * 60)
+
         if use_wandb and wandb.run is not None:
-            wandb.log(
-                {
-                    "train/loss_epoch": avg_loss,
-                    "val/eer": eer,
-                    "val/threshold": thr,
-                    "epoch": epoch,
-                },
-                step=global_step,
-            )
+            wandb.finish()
 
-        # Save best model
-        if eer < best_eer:
-            best_eer = eer
-            save_best(
-                ckpt_dir,
-                best_model_name,
-                epoch,
-                model,
-                arcface_loss,
-                eer,
-                use_wandb,
-            )
-
-        # Periodic checkpoint
-        if epoch % ckpt_interval == 0:
-            ckpt_path = os.path.join(ckpt_dir, f"checkpoint_epoch{epoch:03d}.pth")
-            save_checkpoint(
-                ckpt_path,
-                epoch,
-                model,
-                arcface_loss,
-                optimizer,
-                scheduler,
-                best_eer,
-                use_wandb,
-            )
-
-    print("=" * 60)
-    print(f"Training complete. Best val EER: {best_eer:.4f}")
-    print("=" * 60)
-
-    if use_wandb and wandb.run is not None:
-        wandb.finish()
+    cleanup_ddp()
 
 
 # ──────────────────────────────────────────────────────────────
