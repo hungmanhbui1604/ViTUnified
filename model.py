@@ -74,3 +74,10 @@ class ViTUnified(nn.Module):
     def feature_extraction(self, x: torch.Tensor) -> torch.Tensor:
         final_embedding, _ = self.forward(x)
         return final_embedding
+    
+    def _freeze_pad_heads(self):
+        for param in self.pad_heads.parameters():
+            param.requires_grad = False
+        
+        self.pad_heads.eval() 
+        print("All PAD heads have been frozen.")

@@ -142,8 +142,8 @@ def create_FVC_splits(
 
     print(
         f"FVC Dataset Splits:\n"
-        f"• Train: {len(unified["train"])} samples ({unified["train_subjects"]} subjects)\n"
-        f"• Val: {len(unified["val"])} samples ({unified["val_subjects"]} subjects)\n"
+        f"• Train: {len(unified['train'])} samples ({unified['train_subjects']} subjects)\n"
+        f"• Val: {len(unified['val'])} samples ({unified['val_subjects']} subjects)\n"
         f"• Test: {n_test} samples split across {len(databases)} DBs"
     )
 
@@ -215,9 +215,9 @@ def create_SD302_splits(
 
     print(
         f"SD302 Splits:\n"
-        f"• Train: {len(unified["train"])} samples ({unified["train_subjects"]} subjects)\n"
-        f"• Val: {len(unified["val"])} samples ({unified["val_subjects"]} subjects)\n"
-        f"• Test: {len(unified["test"])} samples ({unified["test_subjects"]} subjects)"
+        f"• Train: {len(unified['train'])} samples ({unified['train_subjects']} subjects)\n"
+        f"• Val: {len(unified['val'])} samples ({unified['val_subjects']} subjects)\n"
+        f"• Test: {len(unified['test'])} samples ({unified['test_subjects']} subjects)"
     )
 
     return unified
@@ -309,8 +309,8 @@ def create_LivDet_recog_splits(
 
     print(
         f"LivDet Recognition Splits:\n"
-        f"• Train: {len(unified["train"])} samples ({unified["train_subjects"]} subjects)\n"
-        f"• Val: {len(unified["val"])} samples ({unified["val_subjects"]} subjects)\n"
+        f"• Train: {len(unified['train'])} samples ({unified['train_subjects']} subjects)\n"
+        f"• Val: {len(unified['val'])} samples ({unified['val_subjects']} subjects)\n"
         f"• Test: {n_test} samples across {len(test_keys)} sensors"
     )
 
@@ -386,12 +386,12 @@ def create_LivDet_PAD_splits(
     test_keys = [k for k in unified if k.startswith("test_")]
     n_test = sum(len(unified[k]) for k in test_keys)
 
-    print(f"""
-    LivDet PAD Splits:
-    • Train: {len(unified["train"])} samples (live={_cnt(unified["train"], 0)}, spoof={_cnt(unified["train"], 1)})
-    • Val: {len(unified["val"])} samples (live={_cnt(unified["val"], 0)}, spoof={_cnt(unified["val"], 1)})
-    • Test: {n_test} imgs across {len(test_keys)} sensors
-    """)
+    print(
+        f"LivDet PAD Splits:\n"
+        f"• Train: {len(unified['train'])} samples (live={_cnt(unified['train'], 0)}, spoof={_cnt(unified['train'], 1)})\n"
+        f"• Val: {len(unified['val'])} samples (live={_cnt(unified['val'], 0)}, spoof={_cnt(unified['val'], 1)})\n"
+        f"• Test: {n_test} imgs across {len(test_keys)} sensors"
+    )
 
     return unified
 
@@ -452,8 +452,8 @@ def unify_recog_splits(
 
     print(
         f"Unified Recognition Splits:\n"
-        f"• Train: {len(unified["train"])} samples ({unified["train_subjects"]} subjects)\n"
-        f"• Val: {len(unified["val"])} samples ({unified["val_subjects"]} subjects)\n"
+        f"• Train: {len(unified['train'])} samples ({unified['train_subjects']} subjects)\n"
+        f"• Val: {len(unified['val'])} samples ({unified['val_subjects']} subjects)\n"
     )
 
     return unified
@@ -492,6 +492,7 @@ class RecogTrainingDataset(Dataset):
             f"• n_ids: {len(self.key_to_label)}\n"
             f"• n_samples: {len(self)}"
         )
+
 
 class RecogEvaluationDataset(Dataset):
     def __init__(
@@ -576,7 +577,8 @@ class RecogEvaluationDataset(Dataset):
     def __repr__(self):
         n_genuine = sum(1 for *_, lbl in self.pairs if lbl == 0)
         n_impostor = sum(1 for *_, lbl in self.pairs if lbl == 1)
-        return (f"RecogEvaluationDataset:\n"
+        return (
+            f"RecogEvaluationDataset:\n"
             f"• split: '{self.split}'\n"
             f"• n_ids: {self.n_ids}\n"
             f"• n_genuine_impressions: {self.n_genuine_impressions}\n"
@@ -619,13 +621,13 @@ class PADDataset(Dataset):
         return img, self.labels[idx]
 
     def __repr__(self):
-        return f"""
-        PADDataset: 
-        • split: '{self.split}'
-        • n_samples: {len(self)}
-        • live: {self.labels.count(0)}
-        • spoof: {self.labels.count(1)}
-        """
+        return (
+            f"PADDataset:\n"
+            f"• split: '{self.split}'\n"
+            f"• n_samples: {len(self)}\n"
+            f"• live: {self.labels.count(0)}\n"
+            f"• spoof: {self.labels.count(1)}"
+        )
 
 
 # ─────Dataloader─────
@@ -660,4 +662,6 @@ if __name__ == "__main__":
         [transforms.Resize((224, 224)), transforms.ToTensor()]
     )
 
-    create_FVC_splits()
+    # create_FVC_splits()
+    create_LivDet_recog_splits()
+    create_LivDet_PAD_splits()

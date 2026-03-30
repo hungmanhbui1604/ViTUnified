@@ -3,4 +3,5 @@ ckpts/
 data/
 wandb/
 config_recog.yaml
+config_pad.yaml
 data.zip
