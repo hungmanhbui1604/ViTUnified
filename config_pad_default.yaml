@@ -2,7 +2,7 @@ general:
   seed: 42
 
 wandb:
-  api_key: "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"
+  api_key: "your_wandb_api_key_here"
   project: "ViTUnified"
 
 model:
