@@ -9,3 +9,5 @@ wandb>=0.16
 
 Pillow>=9.0
 PyYAML>=6.0
+
+matplotlib>=3.7

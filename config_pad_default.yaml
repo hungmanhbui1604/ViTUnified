@@ -24,7 +24,7 @@ training:
   batch_size: 256
   num_workers: 4
   pin_memory: true
-  checkpoint_interval: 20
+  checkpoint_interval: 10
   lambda_mse: 1.0          # weight for the recog distillation MSE term
 
 data:

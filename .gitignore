@@ -6,3 +6,4 @@ wandb/
 config_recog.yaml
 config_pad.yaml
 data.zip
+evaluate_recog.sh

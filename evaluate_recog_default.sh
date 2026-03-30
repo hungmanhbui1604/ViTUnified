@@ -6,11 +6,11 @@ SPLIT_FILE="data/FVC/fvc_splits.json"
 DBS=(
     test_fvc2000_db1
     test_fvc2000_db2
-    # test_fvc2002_db1
-    # test_fvc2002_db2
-    # test_fvc2002_db3
-    # test_fvc2004_db1
-    # test_fvc2004_db2
+    test_fvc2002_db1
+    test_fvc2002_db2
+    test_fvc2002_db3
+    test_fvc2004_db1
+    test_fvc2004_db2
 )
 
 for DB in "${DBS[@]}"; do
@@ -21,7 +21,7 @@ for DB in "${DBS[@]}"; do
         --split-file "$SPLIT_FILE" \
         --split "$DB" \
         --output-dir "results/recog/$DB" \
-        --batch-size 8
+        --batch-size 128
 done
 
 SPLIT_FILE="data/SD302/sd302_splits.json"
@@ -34,4 +34,4 @@ python evaluate_recog.py \
     --split-file "$SPLIT_FILE" \
     --split "$DB" \
     --output-dir "results/recog/test_sd302" \
-    --batch-size 8
+    --batch-size 128
