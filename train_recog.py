@@ -306,7 +306,7 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
         unify_recog_splits(
             data_root=data_cfg["data_root"],
             datasets=data_cfg["datasets"],
-            output_path=data_cfg["splits"],
+            output_path=data_cfg["splits"]
         )
     dist.barrier()  # all ranks wait until splits file exists
 
