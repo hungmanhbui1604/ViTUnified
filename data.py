@@ -663,5 +663,6 @@ if __name__ == "__main__":
     )
 
     # create_FVC_splits()
-    create_LivDet_recog_splits()
-    create_LivDet_PAD_splits()
+    create_SD302_splits()
+    # create_LivDet_recog_splits()
+    # create_LivDet_PAD_splits()

@@ -174,7 +174,7 @@ def save_best(
 
     if use_wandb and wandb.run is not None:
         artifact = wandb.Artifact(
-            name="best-model",
+            name="recog-best-model",
             type="model",
             metadata={"epoch": epoch, "val_eer": eer},
         )
