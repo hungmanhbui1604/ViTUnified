@@ -26,17 +26,17 @@ scheduler:
 training:
   epochs: 100
   batch_size: 256
-  num_workers: 4
+  num_workers: 8
   pin_memory: true
   checkpoint_interval: 20
 
 data:
   data_root: "data/"
   splits_path: "data/splits.json"
-  n_genuine_impressions: 2
+  n_genuine_impressions: 8
   n_impostor_impressions: 1
-  impostor_mode: "all"
-  n_impostor_subset: None
+  impostor_mode: "sub"
+  n_impostor_subset: 100
 
 output:
   checkpoint_dir: "ckpts/recog/"
@@ -44,10 +44,4 @@ output:
 
 evaluation:
   batch_size: 256
-  num_workers: 4
-  pin_memory: true
-  n_genuine_impressions: 2
-  n_impostor_impressions: 1
-  impostor_mode: "all"
-  n_impostor_subset: None
   checkpoint_path: "ckpts/recog/recog_best_eer.pth"

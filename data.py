@@ -725,46 +725,47 @@ if __name__ == "__main__":
     # output_path = "data/FVC/fvc_splits.json"
     # create_recog_splits(data_root=data_root, output_path=output_path, split_ratio=[0.6, 0.2, 0.2])
 
-    data_roots = [
-        "CASIA-FSA",
-        "CASIA-FV5",
-        "FVC",
-        "Neurotechnology/CrossMatch",
-        "Neurotechnology/UareU",
-        "PolyU",
-        "SD301a",
-        "SD302",
-    ]
-    output_paths = [
-        "casiafsa",
-        "casiafv5",
-        "fvc",
-        "neurocm",
-        "neurouau",
-        "polyu",
-        "sd301a",
-        "sd302",
-    ]
-    for data_root, output_path in zip(data_roots, output_paths):
-        create_recog_splits(
-            data_root="data/" + data_root,
-            output_path=f"data/{data_root}/{output_path}_splits.json",
-            split_ratio=[0.6, 0.2, 0.2],
-        )
+    # data_roots = [
+    #     "CASIA-FSA",
+    #     "CASIA-FV5",
+    #     "FVC",
+    #     "Neurotechnology/CrossMatch",
+    #     "Neurotechnology/UareU",
+    #     "PolyU",
+    #     "SD301a",
+    #     "SD302",
+    # ]
+    # output_paths = [
+    #     "casiafsa",
+    #     "casiafv5",
+    #     "fvc",
+    #     "neurocm",
+    #     "neurouau",
+    #     "polyu",
+    #     "sd301a",
+    #     "sd302",
+    # ]
+    # for data_root, output_path in zip(data_roots, output_paths):
+    #     create_recog_splits(
+    #         data_root="data/" + data_root,
+    #         output_path=f"data/{data_root}/{output_path}_splits.json",
+    #         split_ratio=[0.6, 0.2, 0.2]
+    #     )
+    #     print()
 
-    unify_recog_splits(
-        splits_paths=[
-            "data/CASIA-FSA/casiafsa_splits.json",
-            "data/CASIA-FV5/casiafv5_splits.json",
-            "data/FVC/fvc_splits.json",
-            "data/Neurotechnology/CrossMatch/neurocm_splits.json",
-            "data/Neurotechnology/UareU/neurouau_splits.json",
-            "data/PolyU/polyu_splits.json",
-            "data/SD301a/sd301a_splits.json",
-            "data/SD302/sd302_splits.json",
-        ],
-        output_path="data/splits.json",
-    )
+    # unify_recog_splits(
+    #     splits_paths=[
+    #         "data/CASIA-FSA/casiafsa_splits.json",
+    #         "data/CASIA-FV5/casiafv5_splits.json",
+    #         "data/FVC/fvc_splits.json",
+    #         "data/Neurotechnology/CrossMatch/neurocm_splits.json",
+    #         "data/Neurotechnology/UareU/neurouau_splits.json",
+    #         "data/PolyU/polyu_splits.json",
+    #         "data/SD301a/sd301a_splits.json",
+    #         "data/SD302/sd302_splits.json",
+    #     ],
+    #     output_path="data/splits.json",
+    # )
 
     # train_dataset = RecogTrainingDataset(
     #     splits_path="data/splits.json", transform=transform
@@ -776,6 +777,16 @@ if __name__ == "__main__":
     #     print(imgs.shape)
     #     print(labels)
     #     break
+
+    val_dataset = RecogEvaluationDataset(
+        splits_path="data/splits.json",
+        transform=transform,
+        split="val",
+        n_genuine_impressions=8,
+        impostor_mode="sub",
+        n_impostor_subset=100
+    )
+    print(val_dataset)
 
     # test_dataset = RecogEvaluationDataset(
     #     splits_path="data/splits.json", transform=transform
