@@ -17,7 +17,6 @@ from tqdm import tqdm
 import wandb
 from data import RecogEvaluationDataset, RecogTrainingDataset
 from loss import ArcFaceLoss
-from metrics import compute_eer
 from model import ViTUnified
 from schedulers import polynomial_scheduler
 from transforms import get_transforms
@@ -28,7 +27,6 @@ from transforms import get_transforms
 
 
 def setup_ddp() -> tuple[int, int]:
-    """Initialise NCCL process group. Returns (local_rank, world_size)."""
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
     dist.init_process_group(backend="nccl", device_id=local_rank)
@@ -40,7 +38,6 @@ def cleanup_ddp() -> None:
 
 
 def is_main() -> bool:
-    """True only on rank-0 (or when DDP is not active)."""
     return not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0
 
 
@@ -67,40 +64,84 @@ def load_config(path: str) -> dict:
 
 
 @torch.no_grad()
+def compute_eer_gpu(pos_hist: torch.Tensor, neg_hist: torch.Tensor, bins: torch.Tensor):
+
+    # cumulative
+    pos_cum = torch.cumsum(pos_hist.flip(0), dim=0).flip(0)
+    neg_cum = torch.cumsum(neg_hist, dim=0)
+
+    pos_total = pos_hist.sum()
+    neg_total = neg_hist.sum()
+
+    fnr = pos_cum / pos_total
+    fpr = neg_cum / neg_total
+
+    diff = torch.abs(fpr - fnr)
+    idx = torch.argmin(diff)
+
+    eer = (fpr[idx] + fnr[idx]) / 2.0
+    thr = bins[idx]
+
+    return eer.item(), thr.item()
+
+
+@torch.no_grad()
 def evaluate(
-    model: DDP,
+    model: torch.nn.Module,
     val_loader: DataLoader,
     device: torch.device,
     epoch: int,
 ) -> tuple[float, float]:
     model.eval()
-    all_scores, all_labels = [], []
+
+    n_bins = 10000
+    min_val, max_val = -1.0, 1.0
+
+    # 🔥 histogram trên GPU
+    pos_hist = torch.zeros(n_bins, device=device)
+    neg_hist = torch.zeros(n_bins, device=device)
+
+    bin_edges = torch.linspace(min_val, max_val, steps=n_bins + 1, device=device)
 
     pbar = tqdm(
         val_loader,
         desc=f"Epoch {epoch:03d} [val]",
         leave=False,
         unit="batch",
-        disable=not is_main(),  # only show progress bar on rank-0
+        disable=not is_main(),
     )
+
     for img_a, img_b, labels in pbar:
         img_a = img_a.to(device, non_blocking=True)
         img_b = img_b.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
 
-        emb_a, _ = model(img_a)
-        emb_b, _ = model(img_b)
+        imgs = torch.cat([img_a, img_b], dim=0)
 
-        emb_a = F.normalize(emb_a, p=2, dim=1)
-        emb_b = F.normalize(emb_b, p=2, dim=1)
+        with torch.autocast(device_type="cuda"):
+            emb, _ = model(imgs)
 
-        cos_sim = (emb_a * emb_b).sum(dim=1).cpu().numpy()
-        all_scores.append(cos_sim)
-        all_labels.append(labels.numpy())
+        emb = F.normalize(emb, dim=1)
+        emb_a, emb_b = torch.chunk(emb, 2, dim=0)
 
-    all_scores = np.concatenate(all_scores)
-    all_labels = np.concatenate(all_labels)
+        cos_sim = (emb_a * emb_b).sum(dim=1)
 
-    return compute_eer(all_scores, all_labels)
+        pos_scores = cos_sim[labels == 1]
+        neg_scores = cos_sim[labels == 0]
+
+        if pos_scores.numel() > 0:
+            pos_hist += torch.histc(pos_scores, bins=n_bins, min=min_val, max=max_val)
+
+        if neg_scores.numel() > 0:
+            neg_hist += torch.histc(neg_scores, bins=n_bins, min=min_val, max=max_val)
+    
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(pos_hist, op=dist.ReduceOp.SUM)
+        dist.all_reduce(neg_hist, op=dist.ReduceOp.SUM)
+
+    eer, thr = compute_eer_gpu(pos_hist, neg_hist, bin_edges)
+
+    return eer, thr
 
 
 # ──────────────────────────────────────────────────────────────
@@ -193,6 +234,7 @@ def train_one_epoch(
     train_sampler: DistributedSampler,
     optimizer: AdamW,
     scheduler: LambdaLR,
+    scaler: torch.amp.GradScaler,
     device: torch.device,
     epoch: int,
     global_step: int,
@@ -221,15 +263,19 @@ def train_one_epoch(
 
         optimizer.zero_grad(set_to_none=True)
 
-        embeddings, _pad_logits = model(images)
-        loss, _ = arcface_loss(embeddings, labels)
+        with torch.autocast(device_type="cuda"):
+            embeddings, _ = model(images)
+            loss, _ = arcface_loss(embeddings, labels)
 
-        loss.backward()
+        scaler.scale(loss).backward()
+
+        scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(
             all_params,
             max_norm=1.0,
         )
-        optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
         scheduler.step()
 
         loss_val = loss.item()
@@ -334,11 +380,18 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
         pin_memory=training_cfg["pin_memory"],
     )
 
-    # Validation: every rank runs the full val set (results identical across ranks)
+    val_sampler = DistributedSampler(
+        val_dataset,
+        num_replicas=world_size,
+        rank=local_rank,
+        shuffle=False,
+        drop_last=False
+    )
+
     val_loader = DataLoader(
         val_dataset,
         batch_size=training_cfg["batch_size"],
-        shuffle=False,
+        sampler=val_sampler,
         num_workers=training_cfg["num_workers"],
         pin_memory=training_cfg["pin_memory"],
     )
@@ -395,6 +448,8 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
         power=sched_cfg["power"],
     )
 
+    scaler = torch.amp.GradScaler("cuda")
+
     # ── training loop ─────────────────────────────────────────────────────────
     best_eer = float("inf")
     ckpt_interval = training_cfg["checkpoint_interval"]
@@ -423,6 +478,7 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
             train_sampler,
             optimizer,
             scheduler,
+            scaler,
             device,
             epoch,
             global_step,
@@ -432,7 +488,7 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
         # Synchronise all ranks before evaluation
         dist.barrier()
 
-        eer, thr = evaluate(model, val_loader, device, epoch)
+        eer, thr = evaluate(_unwrap(model), val_loader, device, epoch)
 
         if is_main():
             epoch_pbar.set_postfix(
