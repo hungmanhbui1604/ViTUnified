@@ -313,6 +313,7 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
     sched_cfg = cfg["scheduler"]
     output_cfg = cfg["output"]
     wandb_cfg = cfg.get("wandb", {})
+    evaluation_cfg = cfg["evaluation"]
 
     set_seed(general_cfg["seed"] + local_rank)  # unique seed per rank
 
@@ -390,7 +391,7 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
 
     val_loader = DataLoader(
         val_dataset,
-        batch_size=training_cfg["batch_size"],
+        batch_size=evaluation_cfg["batch_size"],
         sampler=val_sampler,
         num_workers=training_cfg["num_workers"],
         pin_memory=training_cfg["pin_memory"],

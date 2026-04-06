@@ -51,6 +51,7 @@ class ArcFaceLoss(nn.Module):
 
         # Clone cosine to avoid in-place gradient errors, then update target indices
         logits = cosine.clone()
+        phi = phi.to(logits.dtype)
         logits[idx, labels] = phi
 
         # Scale and compute loss
