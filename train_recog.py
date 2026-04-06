@@ -59,7 +59,7 @@ def load_config(path: str) -> dict:
 
 
 # ──────────────────────────────────────────────────────────────
-#  Evaluation loop  (runs on every rank; only rank-0 computes EER)
+#  Evaluation loop
 # ──────────────────────────────────────────────────────────────
 
 
@@ -365,7 +365,6 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
         print(f"{val_dataset}")
 
     # ── dataloaders ───────────────────────────────────────────────────────────
-    # Training: each GPU sees a non-overlapping shard via DistributedSampler
     train_sampler = DistributedSampler(
         train_dataset,
         num_replicas=world_size,
@@ -375,8 +374,8 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
     )
     train_loader = DataLoader(
         train_dataset,
-        batch_size=training_cfg["batch_size"],  # per-GPU batch size
-        sampler=train_sampler,  # replaces shuffle=True
+        batch_size=training_cfg["batch_size"],
+        sampler=train_sampler,
         num_workers=training_cfg["num_workers"],
         pin_memory=training_cfg["pin_memory"],
     )
@@ -433,7 +432,7 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
     ).to(device)
     arcface_loss = DDP(arcface_loss, device_ids=[local_rank], output_device=local_rank)
 
-    # ── optimizer & scheduler ─────────────────────────────────────────────────
+    # ── optimizer & scheduler& scaler ─────────────────────────────────────────────────
     optimizer = AdamW(
         list(model.parameters()) + list(arcface_loss.parameters()),
         lr=opt_cfg["lr"],
@@ -486,7 +485,6 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
             use_wandb,
         )
 
-        # Synchronise all ranks before evaluation
         dist.barrier()
 
         eer, thr = evaluate(_unwrap(model), val_loader, device, epoch)
@@ -536,7 +534,6 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
                     use_wandb,
                 )
 
-        # All ranks wait for rank-0 to finish saving before next epoch
         dist.barrier()
 
     if is_main():
