@@ -15,11 +15,7 @@ from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
 import wandb
-from data import (
-    RecogEvaluationDataset,
-    RecogTrainingDataset,
-    unify_recog_splits,
-)
+from data import RecogEvaluationDataset, RecogTrainingDataset
 from loss import ArcFaceLoss
 from metrics import compute_eer
 from model import ViTUnified
@@ -33,9 +29,9 @@ from transforms import get_transforms
 
 def setup_ddp() -> tuple[int, int]:
     """Initialise NCCL process group. Returns (local_rank, world_size)."""
-    dist.init_process_group(backend="nccl")
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend="nccl", device_id=local_rank)
     return local_rank, dist.get_world_size()
 
 
@@ -260,7 +256,7 @@ def train_one_epoch(
 def main(cfg: dict, use_wandb: bool = True) -> None:
     # ── DDP init ────────────────────────────────────────────────────────────
     local_rank, world_size = setup_ddp()
-    device = torch.device(f"cuda:{local_rank}")
+    device = torch.device("cuda", local_rank)
 
     general_cfg = cfg["general"]
     data_cfg = cfg["data"]
@@ -301,22 +297,13 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
     # ── transforms ──────────────────────────────────────────────────────────
     train_transform, eval_transform = get_transforms("all")
 
-    # ── splits (rank-0 creates them, others wait) ────────────────────────────
-    if is_main() and not os.path.exists(data_cfg["splits"]):
-        unify_recog_splits(
-            data_root=data_cfg["data_root"],
-            datasets=data_cfg["datasets"],
-            output_path=data_cfg["splits"]
-        )
-    dist.barrier()  # all ranks wait until splits file exists
-
     # ── datasets ─────────────────────────────────────────────────────────────
     train_dataset = RecogTrainingDataset(
-        json_path=data_cfg["splits"],
+        splits_path=data_cfg["splits_path"],
         transform=train_transform,
     )
     val_dataset = RecogEvaluationDataset(
-        json_path=data_cfg["splits"],
+        splits_path=data_cfg["splits_path"],
         split="val",
         n_genuine_impressions=data_cfg["n_genuine_impressions"],
         n_impostor_impressions=data_cfg["n_impostor_impressions"],
@@ -360,7 +347,7 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
         wandb.run.summary.update(
             {
                 "dataset/train_samples": len(train_dataset),
-                "dataset/train_ids": len(train_dataset.key_to_label),
+                "dataset/train_ids": len(train_dataset.id_to_label),
                 "dataset/val_pairs": len(val_dataset),
                 "training/world_size": world_size,
                 "training/per_gpu_batch": training_cfg["batch_size"],
@@ -382,7 +369,7 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
         wandb.watch(model, log="parameters", log_freq=100)
 
     # ── loss ──────────────────────────────────────────────────────────────────
-    num_ids = len(train_dataset.key_to_label)
+    num_ids = len(train_dataset.id_to_label)
     embed_dim = _unwrap(model).embed_dim
     arcface_loss = ArcFaceLoss(
         embed_dim=embed_dim,
