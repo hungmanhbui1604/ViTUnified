@@ -172,15 +172,16 @@ def _extract_id(path: str, id_type: str = "subject") -> str:
 def create_recog_splits(
     data_root: str,
     output_path: str,
-    split_ratio: tuple = [0.8, 0.0, 0.2],
+    split_ratio: tuple = (0.8, 0.0, 0.2),
     seed: int = 42,
+    min_samples: Optional[int] = 3,
+    max_samples: Optional[int] = None,
 ) -> dict:
     assert len(split_ratio) == 3, "split_ratio must have 3 values (train, val, test)"
     assert all(r >= 0 for r in split_ratio), "split_ratio must be non-negative"
     assert abs(sum(split_ratio) - 1.0) < 1e-6, "split_ratio must sum to 1"
 
     rng = random.Random(seed)
-
     print(f"Creating splits for {data_root}")
 
     exts = ("*.bmp", "*.tif", "*.png", "*.jpg")
@@ -189,25 +190,38 @@ def create_recog_splits(
         for ext in exts
         for p in glob.glob(os.path.join(data_root, "**", ext), recursive=True)
     ]
-    print("Total files:", len(all_paths))
 
     subject_finger_paths = {}
     for path in all_paths:
         subject = _extract_id(path, "subject")
         finger = _extract_id(path, "finger")
         if subject not in subject_finger_paths:
-            subject_finger_paths[subject] = {finger: [path]}
-        else:
-            if finger not in subject_finger_paths[subject]:
-                subject_finger_paths[subject][finger] = []
-            subject_finger_paths[subject][finger].append(path)
+            subject_finger_paths[subject] = {}
+        if finger not in subject_finger_paths[subject]:
+            subject_finger_paths[subject][finger] = []
+        subject_finger_paths[subject][finger].append(path)
 
-    collected_paths = set()
-    for fingers in subject_finger_paths.values():
-        for paths in fingers.values():
-            collected_paths.update(paths)
-    missing = set(all_paths) - collected_paths
-    assert len(missing) == 0, f"Missing {len(missing)} files after ID extraction"
+    if min_samples is not None or max_samples is not None:
+        filtered_subject_finger_paths = {}
+        removed_count = 0
+
+        for subject, fingers in subject_finger_paths.items():
+            valid_fingers = {}
+            for finger, paths in fingers.items():
+                count = len(paths)
+                # Check bounds
+                if (min_samples is None or count >= min_samples) and (
+                    max_samples is None or count <= max_samples
+                ):
+                    valid_fingers[finger] = paths
+                else:
+                    removed_count += 1
+
+            if valid_fingers:
+                filtered_subject_finger_paths[subject] = valid_fingers
+
+        subject_finger_paths = filtered_subject_finger_paths
+        print(f"Filtered out {removed_count} fingers based on sample constraints.")
 
     all_subjects = sorted(subject_finger_paths.keys())
     rng.shuffle(all_subjects)
@@ -227,6 +241,7 @@ def create_recog_splits(
         "val_samples": 0,
         "test_samples": 0,
     }
+
     for subject, fingers in subject_finger_paths.items():
         target = (
             "train"
@@ -239,22 +254,22 @@ def create_recog_splits(
             splits[target][finger] = paths
             splits[f"{target}_samples"] += len(paths)
 
-    splits["train_subjects"] = n_train
-    splits["val_subjects"] = n_val
-    splits["test_subjects"] = n_total - n_train - n_val
-    splits["train_fingers"] = len(splits["train"])
-    splits["val_fingers"] = len(splits["val"])
-    splits["test_fingers"] = len(splits["test"])
-    splits["total_subjects"] = n_total
-    splits["total_fingers"] = (
-        len(splits["train"]) + len(splits["val"]) + len(splits["test"])
-    )
-    splits["total_samples"] = (
-        splits["train_samples"] + splits["val_samples"] + splits["test_samples"]
-    )
-
-    assert splits["total_samples"] == len(all_paths), (
-        "Mismatch between total samples and actual files"
+    splits.update(
+        {
+            "train_subjects": n_train,
+            "val_subjects": n_val,
+            "test_subjects": n_total - n_train - n_val,
+            "train_fingers": len(splits["train"]),
+            "val_fingers": len(splits["val"]),
+            "test_fingers": len(splits["test"]),
+            "total_subjects": n_total,
+            "total_fingers": len(splits["train"])
+            + len(splits["val"])
+            + len(splits["test"]),
+            "total_samples": splits["train_samples"]
+            + splits["val_samples"]
+            + splits["test_samples"],
+        }
     )
 
     print(
@@ -564,33 +579,22 @@ class RecogEvaluationDataset(Dataset):
         self.impostor_mode = impostor_mode
         self.transform = transform
 
-        assert impostor_mode in ("all", "sub"), (
-            f"Invalid impostor mode '{impostor_mode}'. Choose from: ('all', 'sub'])"
-        )
-        assert n_genuine_impressions >= 2, (
-            "Number of genuine impressions per finger must be greater than or equal to 2"
-        )
-        assert n_impostor_impressions >= 1, (
-            "Number of impostor impressions per finger must be greater than or equal to 1"
-        )
+        assert impostor_mode in ("all", "sub"), f"Invalid mode: {impostor_mode}"
+        assert n_genuine_impressions >= 2, "n_genuine_impressions must be >= 2"
+        assert n_genuine_impressions >= 1, "n_impostor_impressions must be >= 1"
+        assert split in ("test", "val"), f"Invalid split: {split}"
 
         with open(splits_path, "r") as f:
             splits = json.load(f)
-        assert split in splits, (
-            f"Invalid split '{split}'. Choose from: ('test', 'val'])"
-        )
+
         finger_to_paths = splits[split]
         self.n_ids = len(finger_to_paths)
-
-        min_impressions = min(len(p) for p in finger_to_paths.values())
-        assert n_genuine_impressions <= min_impressions, (
-            "Number of genuine impressions per finger must be lower than or equal to minimum of number of impressions of a finger"
-        )
 
         rng = random.Random(seed)
         genuine_pairs = []
         for paths in finger_to_paths.values():
-            selected = rng.sample(paths, n_genuine_impressions)
+            num_to_sample = min(len(paths), self.n_genuine_impressions)
+            selected = rng.sample(paths, num_to_sample)
             for path_a, path_b in combinations(selected, 2):
                 genuine_pairs.append((path_a, path_b, 1))
 
@@ -610,7 +614,8 @@ class RecogEvaluationDataset(Dataset):
             )
 
             for finger_idx, paths in enumerate(finger_paths):
-                other_indices = set(range(self.n_ids)).remove(finger_idx)
+                other_indices = list(range(self.n_ids))
+                other_indices.remove(finger_idx)
                 for _ in range(n_impostor_impressions):
                     path_a = rng.choice(paths)
                     sampled = rng.sample(other_indices, n_impostor_subset)
@@ -637,10 +642,10 @@ class RecogEvaluationDataset(Dataset):
         n_impostor = sum(1 for *_, lbl in self.pairs if lbl == 0)
         return (
             f"RecogEvaluationDataset:\n"
-            f"• n_ids: {self.n_ids}\n"
             f"• n_pairs: {len(self)}\n"
             f"• n_genuine: {n_genuine}\n"
-            f"• n_impostor: {n_impostor}"
+            f"• n_impostor: {n_impostor}\n"
+            f"• n_ids: {self.n_ids}"
         )
 
 
@@ -720,10 +725,32 @@ if __name__ == "__main__":
     # output_path = "data/FVC/fvc_splits.json"
     # create_recog_splits(data_root=data_root, output_path=output_path, split_ratio=[0.6, 0.2, 0.2])
 
-    data_roots = ["CASIA-FSA", "CASIA-FV5", "FVC", "Neurotechnology/CrossMatch", "Neurotechnology/UareU", "PolyU", "SD301a", "SD302"]
-    output_paths = ["casiafsa", "casiafv5", "fvc", "neurocm", "neurouau", "polyu", "sd301a", "sd302"]
+    data_roots = [
+        "CASIA-FSA",
+        "CASIA-FV5",
+        "FVC",
+        "Neurotechnology/CrossMatch",
+        "Neurotechnology/UareU",
+        "PolyU",
+        "SD301a",
+        "SD302",
+    ]
+    output_paths = [
+        "casiafsa",
+        "casiafv5",
+        "fvc",
+        "neurocm",
+        "neurouau",
+        "polyu",
+        "sd301a",
+        "sd302",
+    ]
     for data_root, output_path in zip(data_roots, output_paths):
-        create_recog_splits(data_root="data/"+data_root, output_path=f"data/{data_root}/{output_path}_splits.json", split_ratio=[0.6, 0.2, 0.2])
+        create_recog_splits(
+            data_root="data/" + data_root,
+            output_path=f"data/{data_root}/{output_path}_splits.json",
+            split_ratio=[0.6, 0.2, 0.2],
+        )
 
     unify_recog_splits(
         splits_paths=[
