@@ -65,22 +65,22 @@ def load_config(path: str) -> dict:
 
 @torch.no_grad()
 def compute_eer_gpu(pos_hist: torch.Tensor, neg_hist: torch.Tensor, bins: torch.Tensor):
-
-    # cumulative
-    pos_cum = torch.cumsum(pos_hist.flip(0), dim=0).flip(0)
-    neg_cum = torch.cumsum(neg_hist, dim=0)
-
     pos_total = pos_hist.sum()
     neg_total = neg_hist.sum()
 
-    fnr = pos_cum / pos_total
-    fpr = neg_cum / neg_total
+    pos_cum = torch.cumsum(pos_hist.flip(0), dim=0).flip(0)
+    tar = pos_cum / pos_total
 
-    diff = torch.abs(fpr - fnr)
-    idx = torch.argmin(diff)
+    neg_cum = torch.cumsum(neg_hist, dim=0)
+    tnr = neg_cum / neg_total
 
-    eer = (fpr[idx] + fnr[idx]) / 2.0
-    thr = bins[idx]
+    diff = torch.abs(tar - tnr)
+    idx  = torch.argmin(diff)
+
+    eer = 1.0 - (tar[idx] + tnr[idx]) / 2.0
+    
+    bin_centers = (bins[:-1] + bins[1:]) / 2.0
+    thr = bin_centers[idx]
 
     return eer.item(), thr.item()
 
