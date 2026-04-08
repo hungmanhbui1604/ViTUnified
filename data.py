@@ -460,10 +460,10 @@ def create_LivDet_PAD_splits(
 
 
 def unify_recog_splits(
-    splits_paths: list,
+    split_paths: list,
     output_path: str = "data/splits.json",
 ):
-    print(f"Unifying splits from {splits_paths}")
+    print(f"Unifying splits from {split_paths}")
 
     unified = {
         "train": {},
@@ -482,8 +482,8 @@ def unify_recog_splits(
         "total_fingers": 0,
         "total_samples": 0,
     }
-    for splits_path in splits_paths:
-        with open(splits_path, "r") as f:
+    for split_path in split_paths:
+        with open(split_path, "r") as f:
             splits = json.load(f)
 
         unified["train"].update(splits["train"])
@@ -527,12 +527,12 @@ def unify_recog_splits(
 class RecogTrainingDataset(Dataset):
     def __init__(
         self,
-        splits_path: str = "data/splits.json",
+        split_path: str = "data/splits.json",
         transform: Optional[Callable] = None,
     ):
         self.transform = transform
 
-        with open(splits_path, "r") as f:
+        with open(split_path, "r") as f:
             finger_to_paths = json.load(f)["train"]
 
         self.paths = []
@@ -564,7 +564,7 @@ class RecogTrainingDataset(Dataset):
 class RecogEvaluationDataset(Dataset):
     def __init__(
         self,
-        splits_path: str = "data/splits.json",
+        split_path: str = "data/splits.json",
         split: str = "test",
         n_genuine_impressions: int = 2,
         n_impostor_impressions: int = 1,
@@ -584,7 +584,7 @@ class RecogEvaluationDataset(Dataset):
         assert n_genuine_impressions >= 1, "n_impostor_impressions must be >= 1"
         assert split in ("test", "val"), f"Invalid split: {split}"
 
-        with open(splits_path, "r") as f:
+        with open(split_path, "r") as f:
             splits = json.load(f)
 
         finger_to_paths = splits[split]
@@ -597,6 +597,7 @@ class RecogEvaluationDataset(Dataset):
             selected = rng.sample(paths, num_to_sample)
             for path_a, path_b in combinations(selected, 2):
                 genuine_pairs.append((path_a, path_b, 1))
+        self.n_genuine = len(genuine_pairs)
 
         finger_paths = list(finger_to_paths.values())
         impostor_pairs = []
@@ -607,10 +608,10 @@ class RecogEvaluationDataset(Dataset):
                     impostor_pairs.append((path_a, path_b, 0))
         else:  # "sub"
             assert n_impostor_subset is not None, (
-                "Number of impostor subset must be not None if impostor mode is 'sub'"
+                "n_impostor_subset is not None if impostor_mode == 'sub'"
             )
             assert 1 <= n_impostor_subset < self.n_ids, (
-                "Number of impostor subset must be greater than or equal to 1 and lower than number of fingers if impostor mode is 'sub'"
+                "1 <= n_impostor_subset < self.n_ids if impostor_mode == 'sub'"
             )
 
             for finger_idx, paths in enumerate(finger_paths):
@@ -622,6 +623,7 @@ class RecogEvaluationDataset(Dataset):
                     for other_idx in sampled:
                         path_b = rng.choice(finger_paths[other_idx])
                         impostor_pairs.append((path_a, path_b, 0))
+        self.n_impostor = len(impostor_pairs)
 
         self.pairs = genuine_pairs + impostor_pairs
 
@@ -638,13 +640,11 @@ class RecogEvaluationDataset(Dataset):
         return img_a, img_b, label
 
     def __repr__(self):
-        n_genuine = sum(1 for *_, lbl in self.pairs if lbl == 1)
-        n_impostor = sum(1 for *_, lbl in self.pairs if lbl == 0)
         return (
             f"RecogEvaluationDataset:\n"
             f"• n_pairs: {len(self)}\n"
-            f"• n_genuine: {n_genuine}\n"
-            f"• n_impostor: {n_impostor}\n"
+            f"• n_genuine: {self.n_genuine}\n"
+            f"• n_impostor: {self.n_impostor}\n"
             f"• n_ids: {self.n_ids}"
         )
 
@@ -689,33 +689,6 @@ class PADDataset(Dataset):
         )
 
 
-# ─────Dataloader─────
-def create_dataloaders(
-    train_dataset: Optional[Dataset] = None,
-    val_dataset: Optional[Dataset] = None,
-    test_dataset: Optional[Dataset] = None,
-    batch_size: int = 64,
-    num_workers: int = 4,
-    pin_memory: bool = True,
-) -> DataLoader | tuple:
-    def _loader(dataset, shuffle):
-        return DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=shuffle,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-        )
-
-    loaders = tuple(
-        _loader(ds, shuffle=(ds is train_dataset))
-        for ds in (train_dataset, val_dataset, test_dataset)
-        if ds is not None
-    )
-
-    return loaders[0] if len(loaders) == 1 else loaders
-
-
 if __name__ == "__main__":
     transform = transforms.Compose(
         [transforms.Resize((224, 224)), transforms.ToTensor()]
@@ -754,7 +727,7 @@ if __name__ == "__main__":
     #     print()
 
     # unify_recog_splits(
-    #     splits_paths=[
+    #     split_paths=[
     #         "data/CASIA-FSA/casiafsa_splits.json",
     #         "data/CASIA-FV5/casiafv5_splits.json",
     #         "data/FVC/fvc_splits.json",
@@ -768,34 +741,21 @@ if __name__ == "__main__":
     # )
 
     # train_dataset = RecogTrainingDataset(
-    #     splits_path="data/splits.json", transform=transform
+    #     split_path="data/splits.json", transform=transform
     # )
     # print(train_dataset)
 
-    # train_dataloader = create_dataloaders(train_dataset=train_dataset, batch_size=4)
-    # for imgs, labels in train_dataloader:
-    #     print(imgs.shape)
-    #     print(labels)
-    #     break
-
-    val_dataset = RecogEvaluationDataset(
-        splits_path="data/splits.json",
-        transform=transform,
-        split="val",
-        n_genuine_impressions=8,
-        impostor_mode="sub",
-        n_impostor_subset=100
-    )
-    print(val_dataset)
+    # val_dataset = RecogEvaluationDataset(
+    #     split_path="data/splits.json",
+    #     transform=transform,
+    #     split="val",
+    #     n_genuine_impressions=8,
+    #     impostor_mode="sub",
+    #     n_impostor_subset=100
+    # )
+    # print(val_dataset)
 
     # test_dataset = RecogEvaluationDataset(
-    #     splits_path="data/splits.json", transform=transform
+    #     split_path="data/splits.json", transform=transform
     # )
     # print(test_dataset)
-
-    # train_dataloader = create_dataloaders(test_dataset=test_dataset, batch_size=4)
-    # for img_as, img_bs, labels in train_dataloader:
-    #     print(img_as.shape)
-    #     print(img_bs.shape)
-    #     print(labels)
-    #     break

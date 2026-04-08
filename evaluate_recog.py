@@ -16,7 +16,7 @@ from tqdm import tqdm
 from data import RecogEvaluationDataset
 from model import ViTUnified
 from transforms import get_transforms
-from metrics import compute_roc
+from metrics import compute_recog_metrics
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -38,10 +38,9 @@ def load_model(ckpt_path: str, model_cfg: dict, device: torch.device) -> ViTUnif
     ).to(device)
 
     ckpt = torch.load(ckpt_path, map_location=device)
-    state = ckpt.get("model", ckpt)  # handle bare state-dicts too
-    model.load_state_dict(state, strict=True)
+    model.load_state_dict(ckpt["model"], strict=True)
     model.eval()
-    print(f"[checkpoint] loaded from '{ckpt_path}'  (epoch {ckpt.get('epoch', '?')})")
+    print(f"Checkpoint loaded from '{ckpt_path}'")
     return model
 
 
@@ -62,8 +61,8 @@ def collect_scores(
         img_a = img_a.to(device, non_blocking=True)
         img_b = img_b.to(device, non_blocking=True)
 
-        emb_a, _ = model(img_a)
-        emb_b, _ = model(img_b)
+        emb_a = model.feature_extraction(img_a)
+        emb_b = model.feature_extraction(img_b)
 
         emb_a = F.normalize(emb_a, p=2, dim=1)
         emb_b = F.normalize(emb_b, p=2, dim=1)
@@ -228,7 +227,7 @@ def main(args: argparse.Namespace) -> None:
     evaluation_cfg = cfg["evaluation"]
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
+    print(f"\nDevice: {device}")
 
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -239,8 +238,8 @@ def main(args: argparse.Namespace) -> None:
     _, eval_transform = get_transforms("all")
 
     dataset = RecogEvaluationDataset(
-        splits_path=args.split_file,
-        split=args.split,
+        split_path=args.split_file,
+        split='test',
         n_genuine_impressions=evaluation_cfg["n_genuine_impressions"],
         n_impostor_impressions=evaluation_cfg["n_impostor_impressions"],
         impostor_mode=evaluation_cfg["impostor_mode"],
@@ -248,7 +247,7 @@ def main(args: argparse.Namespace) -> None:
         transform=eval_transform,
         seed=general_cfg["seed"],
     )
-    print(f"\n{dataset}\n")
+    print(f"\n{dataset}")
 
     loader = DataLoader(
         dataset,
@@ -262,54 +261,48 @@ def main(args: argparse.Namespace) -> None:
     scores, labels = collect_scores(model, loader, device)
 
     # ── metrics ──────────────────────────────────────────────────────────────
-    metrics = compute_roc(scores, labels, n_thresholds=2000)
+    metrics = compute_recog_metrics(scores, labels)
 
-    print("\n" + "=" * 55)
-    print(f"  Split           : {args.split}")
+    print("\n" + "=" * 50)
+    print(f"Split path: {args.split_path}")
+    print("Split: 'test'")
     print(
-        f"  Total pairs     : {len(scores):,}"
-        f"  (genuine={int((labels == 0).sum()):,}  impostor={int((labels == 1).sum()):,})"
+        f"Total pairs: {len(dataset):,} "
+        f"(genuine={dataset.n_genuine:,}, impostor={dataset.n_impostor:,})"
     )
-    print("-" * 55)
-    print(
-        f"  EER             : {metrics['EER']:.4f}  (threshold={metrics['EER_threshold']:.4f})"
-    )
-    print(f"  AUC (ROC)       : {metrics['AUC']:.4f}")
-    print(f"  TAR @ FAR=0.01  : {metrics['TAR@FAR=0.01']:.4f}")
-    print(f"  TAR @ FAR=0.001 : {metrics['TAR@FAR=0.001']:.4f}")
-    print(f"  TAR @ FAR=0.0001: {metrics['TAR@FAR=0.0001']:.4f}")
-    print("=" * 55)
+    print("-" * 50)
+    print(f"EER: {metrics['EER']:.4f} (threshold={metrics['EER_threshold']:.4f})")
+    print(f"AUC (ROC): {metrics['AUC']:.4f}")
+    print(f"TAR @ FAR=0.1: {metrics['TAR@FAR=0.1']:.4f}")
+    print(f"TAR @ FAR=0.01: {metrics['TAR@FAR=0.01']:.4f}")
+    print(f"TAR @ FAR=0.001: {metrics['TAR@FAR=0.001']:.4f}")
+    print("=" * 50)
 
-    # ── save JSON (exclude the heavy curve arrays unless requested) ───────────
+    # ── save results to JSON ───────────
     summary = {
-        "checkpoint": args.checkpoint,
-        "split": args.split,
-        "n_pairs": int(len(scores)),
-        "n_genuine": int((labels == 0).sum()),
-        "n_impostor": int((labels == 1).sum()),
+        "split_path": args.split_path,
+        "split": 'test',
+        "n_pairs": len(dataset),
+        "n_genuine": dataset.n_genuine,
+        "n_impostor": dataset.n_impostor,
         "EER": metrics["EER"],
         "EER_threshold": metrics["EER_threshold"],
         "AUC": metrics["AUC"],
+        "TAR@FAR=0.1": metrics["TAR@FAR=0.1"],
         "TAR@FAR=0.01": metrics["TAR@FAR=0.01"],
         "TAR@FAR=0.001": metrics["TAR@FAR=0.001"],
-        "TAR@FAR=0.0001": metrics["TAR@FAR=0.0001"],
     }
     json_path = os.path.join(args.output_dir, "recog_metrics.json")
     with open(json_path, "w") as f:
         json.dump(summary, f, indent=2)
-    print(f"\n[results] metrics saved → {json_path}")
-
-    curves_path = os.path.join(args.output_dir, "recog_curves.json")
-    with open(curves_path, "w") as f:
-        json.dump(metrics, f, indent=2)
-    print(f"[results] full curve data saved → {curves_path}")
+    print(f"\Results saved → {json_path}")
 
     # ── plots ────────────────────────────────────────────────────────────────
     plot_roc(metrics, args.output_dir)
     plot_det(metrics, args.output_dir)
     plot_score_dist(scores, labels, metrics["EER_threshold"], args.output_dir)
 
-    print(f"\nAll outputs written to: {os.path.abspath(args.output_dir)}")
+    print(f"\nAll outputs written to: {args.output_dir}")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -325,19 +318,14 @@ if __name__ == "__main__":
         help="Path to the recognition YAML config",
     )
     parser.add_argument(
-        "--split-file",
+        "--split-path",
         required=True,
         help="Path to the split file",
     )
     parser.add_argument(
-        "--split",
-        default="val",
-        help="Dataset split to evaluate on: 'val' or a test key",
-    )
-    parser.add_argument(
         "--output-dir",
         default="results/recog/",
-        help="Directory for metrics JSON and plot PNGs",
+        help="Directory for result JSON and plot PNGs",
     )
 
     main(parser.parse_args())

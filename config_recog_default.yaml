@@ -32,7 +32,7 @@ training:
 
 data:
   data_root: "data/"
-  splits_path: "data/splits.json"
+  split_path: "data/splits.json"
   n_genuine_impressions: 8
   n_impostor_impressions: 1
   impostor_mode: "sub"
@@ -44,4 +44,10 @@ output:
 
 evaluation:
   batch_size: 256
+  num_workers: 8
+  pin_memory: true
+  n_genuine_impressions: 16
+  n_impostor_impressions: 1
+  impostor_mode: "all"
+  n_impostor_subset: None
   checkpoint_path: "ckpts/recog/recog_best_eer.pth"

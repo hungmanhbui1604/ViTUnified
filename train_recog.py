@@ -346,11 +346,11 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
 
     # ── datasets ─────────────────────────────────────────────────────────────
     train_dataset = RecogTrainingDataset(
-        splits_path=data_cfg["splits_path"],
+        split_path=data_cfg["split_path"],
         transform=train_transform,
     )
     val_dataset = RecogEvaluationDataset(
-        splits_path=data_cfg["splits_path"],
+        split_path=data_cfg["split_path"],
         split="val",
         n_genuine_impressions=data_cfg["n_genuine_impressions"],
         n_impostor_impressions=data_cfg["n_impostor_impressions"],
