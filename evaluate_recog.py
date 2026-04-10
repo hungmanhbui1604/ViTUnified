@@ -13,15 +13,10 @@ import yaml
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from data import RecogEvaluationDataset
+from data import RecogEvaluationDataset, UniqueImageDataset
+from metrics import compute_recog_metrics
 from model import ViTUnified
 from transforms import get_transforms
-from metrics import compute_recog_metrics
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-#  Config / checkpoint helpers
-# ──────────────────────────────────────────────────────────────────────────────
 
 
 def load_config(path: str) -> dict:
@@ -44,39 +39,37 @@ def load_model(ckpt_path: str, model_cfg: dict, device: torch.device) -> ViTUnif
     return model
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-#  Inference — collect cosine-similarity scores and labels
-# ──────────────────────────────────────────────────────────────────────────────
-
-
 @torch.no_grad()
 def collect_scores(
     model: ViTUnified,
     loader: DataLoader,
+    unique_loader: DataLoader,
     device: torch.device,
 ) -> tuple[np.ndarray, np.ndarray]:
+    model.eval()
+
+    embed_dim = model.embed_dim
+    n_unique_images = len(unique_loader.dataset)
+
+    embeddings = torch.zeros((n_unique_images, embed_dim), device=device)
+    for idxs, imgs in tqdm(unique_loader, desc="Extracting embeddings", unit="batch"):
+        imgs = imgs.to(device, non_blocking=True)
+        with torch.autocast(device_type="cuda"):
+            emb, _ = model(imgs)
+        emb = F.normalize(emb, dim=1).float()
+        embeddings[idxs] = emb
+
     all_scores, all_labels = [], []
-
-    for img_a, img_b, labels in tqdm(loader, desc="Inference", unit="batch"):
-        img_a = img_a.to(device, non_blocking=True)
-        img_b = img_b.to(device, non_blocking=True)
-
-        emb_a = model.feature_extraction(img_a)
-        emb_b = model.feature_extraction(img_b)
-
-        emb_a = F.normalize(emb_a, p=2, dim=1)
-        emb_b = F.normalize(emb_b, p=2, dim=1)
+    for idx_a, idx_b, labels in tqdm(loader, desc="Inference", unit="batch"):
+        emb_a = embeddings[idx_a]
+        emb_b = embeddings[idx_b]
 
         cos_sim = (emb_a * emb_b).sum(dim=1).cpu().numpy()
+
         all_scores.append(cos_sim)
         all_labels.append(labels.numpy())
 
     return np.concatenate(all_scores), np.concatenate(all_labels)
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-#  Plotting
-# ──────────────────────────────────────────────────────────────────────────────
 
 
 def _style():
@@ -91,7 +84,6 @@ def _style():
 
 
 def plot_roc(metrics: dict, output_dir: str) -> str:
-    _style()
     fmr = np.array(metrics["FMR"])
     tar = np.array(metrics["TAR"])
     eer = metrics["EER"]
@@ -99,11 +91,22 @@ def plot_roc(metrics: dict, output_dir: str) -> str:
 
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.plot(fmr, tar, lw=2, color="#2563EB", label=f"ROC  (AUC={auc:.4f})")
-    ax.axline((eer, 0), (eer, 1), color="grey", ls="--", lw=1, label=f"EER={eer:.4f}")
+    ax.axvline(eer, color="grey", ls="--", lw=1, label=f"EER={eer:.4f}")
+
+    # EER operating point on the curve
+    ax.scatter(
+        [eer],
+        [1 - eer],
+        zorder=6,
+        s=80,
+        color="grey",
+        marker="x",
+        label=f"EER point ({eer:.4f}, {1 - eer:.4f})",
+    )
 
     # TAR@FAR operating points
     colors = ["#DC2626", "#D97706", "#16A34A"]
-    for far_t, color in zip([0.01, 0.001, 0.0001], colors):
+    for far_t, color in zip([0.1, 0.01, 0.001], colors):
         key = f"TAR@FAR={far_t}"
         tar_val = metrics[key]
         ax.scatter(
@@ -132,7 +135,6 @@ def plot_roc(metrics: dict, output_dir: str) -> str:
 
 def plot_det(metrics: dict, output_dir: str) -> str:
     """DET curve: FNMR vs FMR on a log-log scale (ISO/IEC 19795-1 style)."""
-    _style()
     fmr = np.array(metrics["FMR"])
     fnmr = np.array(metrics["FNMR"])
     eer = metrics["EER"]
@@ -156,6 +158,8 @@ def plot_det(metrics: dict, output_dir: str) -> str:
 
     ax.set_xscale("log")
     ax.set_yscale("log")
+    ax.set_xlim(1e-5, 1.0)
+    ax.set_ylim(1e-5, 1.0)
     ax.set_xlabel("FMR  (False Match Rate)")
     ax.set_ylabel("FNMR  (False Non-Match Rate)")
     ax.set_title("DET Curve — Fingerprint Recognition")
@@ -175,9 +179,8 @@ def plot_score_dist(
     eer_thr: float,
     output_dir: str,
 ) -> str:
-    _style()
-    genuine_scores = scores[labels == 0]
-    impostor_scores = scores[labels == 1]
+    genuine_scores = scores[labels == 1]
+    impostor_scores = scores[labels == 0]
 
     fig, ax = plt.subplots(figsize=(7, 4))
     bins = np.linspace(scores.min(), scores.max(), 80)
@@ -214,11 +217,6 @@ def plot_score_dist(
     return path
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-#  Main
-# ──────────────────────────────────────────────────────────────────────────────
-
-
 def main(args: argparse.Namespace) -> None:
     # ── setup ────────────────────────────────────────────────────────────────
     cfg = load_config(args.config)
@@ -238,16 +236,22 @@ def main(args: argparse.Namespace) -> None:
     _, eval_transform = get_transforms("all")
 
     dataset = RecogEvaluationDataset(
-        split_path=args.split_file,
-        split='test',
+        split_path=args.split_path,
+        split="test",
         n_genuine_impressions=evaluation_cfg["n_genuine_impressions"],
         n_impostor_impressions=evaluation_cfg["n_impostor_impressions"],
         impostor_mode=evaluation_cfg["impostor_mode"],
-        n_impostor_subset=evaluation_cfg["n_impostor_subset"],
-        transform=eval_transform,
+        n_impostor_subset=None
+        if evaluation_cfg["n_impostor_subset"] in ("None", None)
+        else evaluation_cfg["n_impostor_subset"],
         seed=general_cfg["seed"],
     )
     print(f"\n{dataset}")
+
+    unique_dataset = UniqueImageDataset(
+        idx_to_path=dataset.idx_to_path,
+        transform=eval_transform,
+    )
 
     loader = DataLoader(
         dataset,
@@ -257,8 +261,16 @@ def main(args: argparse.Namespace) -> None:
         pin_memory=evaluation_cfg["pin_memory"],
     )
 
+    unique_loader = DataLoader(
+        unique_dataset,
+        batch_size=evaluation_cfg["unique_batch_size"],
+        shuffle=False,
+        num_workers=evaluation_cfg["num_workers"],
+        pin_memory=evaluation_cfg["pin_memory"],
+    )
+
     # ── inference ────────────────────────────────────────────────────────────
-    scores, labels = collect_scores(model, loader, device)
+    scores, labels = collect_scores(model, loader, unique_loader, device)
 
     # ── metrics ──────────────────────────────────────────────────────────────
     metrics = compute_recog_metrics(scores, labels)
@@ -278,10 +290,10 @@ def main(args: argparse.Namespace) -> None:
     print(f"TAR @ FAR=0.001: {metrics['TAR@FAR=0.001']:.4f}")
     print("=" * 50)
 
-    # ── save results to JSON ───────────
+    # ── save results to JSON ──────────────────────────────────────────────────
     summary = {
         "split_path": args.split_path,
-        "split": 'test',
+        "split": "test",
         "n_pairs": len(dataset),
         "n_genuine": dataset.n_genuine,
         "n_impostor": dataset.n_impostor,
@@ -295,9 +307,10 @@ def main(args: argparse.Namespace) -> None:
     json_path = os.path.join(args.output_dir, "recog_metrics.json")
     with open(json_path, "w") as f:
         json.dump(summary, f, indent=2)
-    print(f"\Results saved → {json_path}")
+    print(f"\nResults saved → {json_path}")
 
     # ── plots ────────────────────────────────────────────────────────────────
+    _style()
     plot_roc(metrics, args.output_dir)
     plot_det(metrics, args.output_dir)
     plot_score_dist(scores, labels, metrics["EER_threshold"], args.output_dir)

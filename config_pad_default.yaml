@@ -2,12 +2,12 @@ general:
   seed: 42
 
 wandb:
-  api_key: "your_wandb_api_key_here"
+  api_key: ""
   project: "ViTUnified"
 
 model:
   model_name: "vit_small_patch16_224"
-  pretrained: false        # backbone weights come from the recog checkpoint
+  pretrained: false
   num_classes: 2
   pad_dropout: 0.0
 
@@ -25,7 +25,7 @@ training:
   num_workers: 4
   pin_memory: true
   checkpoint_interval: 10
-  lambda_mse: 1.0          # weight for the recog distillation MSE term
+  lambda_mse: 1.0
 
 data:
   data_root: "data/LivDet"
@@ -35,5 +35,5 @@ data:
 output:
   checkpoint_dir: "ckpts/pad/"
   best_model_name: "pad_best_ace.pth"
-  teacher_checkpoint: "ckpts/recog/recog_best_eer.pth"   # frozen recog teacher
-  recog_checkpoint:   "ckpts/recog/recog_best_eer.pth"   # warm-start backbone (optional)
+  teacher_checkpoint: "ckpts/recog/recog_best_eer.pth"
+  recog_checkpoint:   "ckpts/recog/recog_best_eer.pth"

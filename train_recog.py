@@ -6,7 +6,9 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+import wandb
 import yaml
+from sklearn.metrics import roc_curve
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
@@ -14,16 +16,11 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
-import wandb
-from data import RecogEvaluationDataset, RecogTrainingDataset
+from data import RecogEvaluationDataset, RecogTrainingDataset, UniqueImageDataset
 from loss import ArcFaceLoss
 from model import ViTUnified
 from schedulers import polynomial_scheduler
 from transforms import get_transforms
-
-# ────────────────────────────────────────────────────────────
-#  DDP helpers
-# ────────────────────────────────────────────────────────────
 
 
 def setup_ddp() -> tuple[int, int]:
@@ -41,11 +38,6 @@ def is_main() -> bool:
     return not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0
 
 
-# ────────────────────────────────────────────────────────────
-#  Helpers
-# ────────────────────────────────────────────────────────────
-
-
 def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -58,100 +50,184 @@ def load_config(path: str) -> dict:
         return yaml.safe_load(f)
 
 
-# ──────────────────────────────────────────────────────────────
-#  Evaluation loop
-# ──────────────────────────────────────────────────────────────
+# @torch.no_grad()
+# def compute_eer(pos_hist: torch.Tensor, neg_hist: torch.Tensor, bins: torch.Tensor):
+#     pos_total = pos_hist.sum()
+#     neg_total = neg_hist.sum()
+
+#     pos_cum = torch.cumsum(pos_hist.flip(0), dim=0).flip(0)
+#     tar = pos_cum / pos_total
+
+#     neg_cum = torch.cumsum(neg_hist, dim=0)
+#     tnr = neg_cum / neg_total
+
+#     diff = torch.abs(tar - tnr)
+#     idx = torch.argmin(diff)
+
+#     eer = 1.0 - (tar[idx] + tnr[idx]) / 2.0
+
+#     bin_centers = (bins[:-1] + bins[1:]) / 2.0
+#     thr = bin_centers[idx]
+
+#     return eer.item(), thr.item()
 
 
 @torch.no_grad()
-def compute_eer_gpu(pos_hist: torch.Tensor, neg_hist: torch.Tensor, bins: torch.Tensor):
-    pos_total = pos_hist.sum()
-    neg_total = neg_hist.sum()
+def compute_eer(
+    scores: np.ndarray,
+    labels: np.ndarray,
+) -> tuple[float, float]:
+    fmr, tar, thrs = roc_curve(labels, scores, pos_label=1)
+    fnmr = 1.0 - tar
 
-    pos_cum = torch.cumsum(pos_hist.flip(0), dim=0).flip(0)
-    tar = pos_cum / pos_total
+    asc_idx = np.argsort(thrs)
+    thrs = thrs[asc_idx]
+    fmr = fmr[asc_idx]
+    fnmr = fnmr[asc_idx]
 
-    neg_cum = torch.cumsum(neg_hist, dim=0)
-    tnr = neg_cum / neg_total
+    diff = np.abs(fmr - fnmr)
+    eer_idx = int(np.argmin(diff))
+    eer = float((fmr[eer_idx] + fnmr[eer_idx]) / 2.0)
+    eer_thr = float(thrs[eer_idx])
 
-    diff = torch.abs(tar - tnr)
-    idx  = torch.argmin(diff)
-
-    eer = 1.0 - (tar[idx] + tnr[idx]) / 2.0
-    
-    bin_centers = (bins[:-1] + bins[1:]) / 2.0
-    thr = bin_centers[idx]
-
-    return eer.item(), thr.item()
+    return eer, eer_thr
 
 
 @torch.no_grad()
-def evaluate(
+def get_embeddings(
     model: torch.nn.Module,
-    val_loader: DataLoader,
+    val_unique_loader: DataLoader,
     device: torch.device,
     epoch: int,
-) -> tuple[float, float]:
+):
     model.eval()
 
-    n_bins = 10000
-    min_val, max_val = -1.0, 1.0
+    embed_dim = model.embed_dim
+    n_unique_images = len(val_unique_loader.dataset)
 
-    # 🔥 histogram trên GPU
-    pos_hist = torch.zeros(n_bins, device=device)
-    neg_hist = torch.zeros(n_bins, device=device)
+    local_embeddings = torch.zeros((n_unique_images, embed_dim), device=device)
+    mask = torch.zeros(n_unique_images, device=device, dtype=torch.bool)
 
-    bin_edges = torch.linspace(min_val, max_val, steps=n_bins + 1, device=device)
-
-    pbar = tqdm(
-        val_loader,
-        desc=f"Epoch {epoch:03d} [val]",
+    pbar_unique = tqdm(
+        val_unique_loader,
+        desc=f"Epoch {epoch:03d} [val extract]",
         leave=False,
         unit="batch",
         disable=not is_main(),
     )
 
-    for img_a, img_b, labels in pbar:
-        img_a = img_a.to(device, non_blocking=True)
-        img_b = img_b.to(device, non_blocking=True)
-        labels = labels.to(device, non_blocking=True)
-
-        imgs = torch.cat([img_a, img_b], dim=0)
-
+    for idxs, imgs in pbar_unique:
+        imgs = imgs.to(device, non_blocking=True)
         with torch.autocast(device_type="cuda"):
             emb, _ = model(imgs)
+        emb = F.normalize(emb, dim=1).float()
 
-        emb = F.normalize(emb, dim=1)
-        emb_a, emb_b = torch.chunk(emb, 2, dim=0)
+        local_embeddings[idxs] = emb
+        mask[idxs] = True
+
+    counts = torch.zeros(n_unique_images, device=device)
+    counts[mask] = 1.0
+
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(local_embeddings, op=dist.ReduceOp.SUM)
+        dist.all_reduce(counts, op=dist.ReduceOp.SUM)
+
+    global_embeddings = local_embeddings / counts.clamp_min(1.0).unsqueeze(1)
+    return global_embeddings
+
+
+@torch.no_grad()
+def evaluate(
+    val_loader: DataLoader,
+    global_embeddings: torch.Tensor,
+    device: torch.device,
+    epoch: int,
+) -> tuple[float, float]:
+
+    # n_bins = 10000
+    # min_val, max_val = -1.0, 1.0
+
+    # pos_hist = torch.zeros(n_bins, device=device)
+    # neg_hist = torch.zeros(n_bins, device=device)
+
+    # bin_edges = torch.linspace(min_val, max_val, steps=n_bins + 1, device=device)
+
+    all_scores, all_labels = [], []
+
+    pbar_pairs = tqdm(
+        val_loader,
+        desc=f"Epoch {epoch:03d} [val evaluate]",
+        leave=False,
+        unit="batch",
+        disable=not is_main(),
+    )
+
+    for idx_a, idx_b, labels in pbar_pairs:
+        # labels = labels.to(device, non_blocking=True)
+
+        emb_a = global_embeddings[idx_a]
+        emb_b = global_embeddings[idx_b]
 
         cos_sim = (emb_a * emb_b).sum(dim=1)
 
-        pos_scores = cos_sim[labels == 1]
-        neg_scores = cos_sim[labels == 0]
+        all_scores.append(cos_sim.cpu().numpy())
+        all_labels.append(labels.numpy())
 
-        if pos_scores.numel() > 0:
-            pos_hist += torch.histc(pos_scores, bins=n_bins, min=min_val, max=max_val)
+        # pos_scores = cos_sim[labels == 1]
+        # neg_scores = cos_sim[labels == 0]
 
-        if neg_scores.numel() > 0:
-            neg_hist += torch.histc(neg_scores, bins=n_bins, min=min_val, max=max_val)
-    
-    if dist.is_available() and dist.is_initialized():
-        dist.all_reduce(pos_hist, op=dist.ReduceOp.SUM)
-        dist.all_reduce(neg_hist, op=dist.ReduceOp.SUM)
+        # if pos_scores.numel() > 0:
+        #     pos_hist += torch.histc(pos_scores, bins=n_bins, min=min_val, max=max_val)
 
-    eer, thr = compute_eer_gpu(pos_hist, neg_hist, bin_edges)
+        # if neg_scores.numel() > 0:
+        #     neg_hist += torch.histc(neg_scores, bins=n_bins, min=min_val, max=max_val)
+
+    # if dist.is_available() and dist.is_initialized():
+    #     dist.all_reduce(pos_hist, op=dist.ReduceOp.SUM)
+    #     dist.all_reduce(neg_hist, op=dist.ReduceOp.SUM)
+
+    # eer, thr = compute_eer(pos_hist, neg_hist, bin_edges)
+
+    eer, thr = compute_eer(np.concatenate(all_scores), np.concatenate(all_labels))
 
     return eer, thr
 
 
-# ──────────────────────────────────────────────────────────────
-#  Checkpoint helpers  (rank-0 only)
-# ──────────────────────────────────────────────────────────────
-
-
 def _unwrap(module):
-    """Return the underlying module regardless of DDP wrapping."""
     return module.module if isinstance(module, DDP) else module
+
+
+def load_checkpoint(
+    path: str,
+    model: DDP,
+    arcface_loss: DDP,
+    optimizer: AdamW,
+    scheduler: LambdaLR,
+) -> tuple[int, float]:
+    start_epoch = 1
+    best_eer = float("inf")
+
+    if os.path.isfile(path):
+        if is_main():
+            print(f"=> Loading checkpoint '{path}'")
+        ckpt_dict = torch.load(path, map_location="cpu")
+        _unwrap(model).load_state_dict(ckpt_dict["model"])
+        _unwrap(arcface_loss).load_state_dict(ckpt_dict["arcface"])
+        if "optimizer" in ckpt_dict:
+            optimizer.load_state_dict(ckpt_dict["optimizer"])
+        if "scheduler" in ckpt_dict:
+            scheduler.load_state_dict(ckpt_dict["scheduler"])
+        if "epoch" in ckpt_dict:
+            start_epoch = ckpt_dict["epoch"] + 1
+        if "eer" in ckpt_dict:
+            best_eer = ckpt_dict["eer"]
+        if is_main():
+            print(f"=> Loaded checkpoint (epoch {ckpt_dict['epoch']})")
+    else:
+        if is_main():
+            print(f"=> No checkpoint found at '{path}'")
+
+    return start_epoch, best_eer
 
 
 def save_checkpoint(
@@ -161,8 +237,7 @@ def save_checkpoint(
     arcface_loss: DDP,
     optimizer: AdamW,
     scheduler: LambdaLR,
-    best_eer: float,
-    use_wandb: bool = True,
+    eer: float,
 ) -> None:
     torch.save(
         {
@@ -171,17 +246,17 @@ def save_checkpoint(
             "arcface": _unwrap(arcface_loss).state_dict(),
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
-            "best_eer": best_eer,
+            "eer": eer,
         },
         path,
     )
     tqdm.write(f"  [checkpoint] saved → {path}")
 
-    if use_wandb and wandb.run is not None:
+    if wandb.run is not None:
         artifact = wandb.Artifact(
             name=f"checkpoint-epoch{epoch:03d}",
             type="checkpoint",
-            metadata={"epoch": epoch, "best_eer": best_eer},
+            metadata={"epoch": epoch, "eer": eer},
         )
         artifact.add_file(path)
         wandb.log_artifact(artifact)
@@ -195,7 +270,6 @@ def save_best(
     model: DDP,
     arcface_loss: DDP,
     eer: float,
-    use_wandb: bool = True,
 ) -> None:
     path = os.path.join(ckpt_dir, best_name)
     torch.save(
@@ -207,11 +281,11 @@ def save_best(
         },
         path,
     )
-    tqdm.write(f"  [best model] EER={eer:.4f} → saved → {path}")
+    tqdm.write(f"  [best model] EER={eer:.4f} saved → {path}")
 
-    if use_wandb and wandb.run is not None:
+    if wandb.run is not None:
         artifact = wandb.Artifact(
-            name="recog-best-model",
+            name="best-model",
             type="model",
             metadata={"epoch": epoch, "val_eer": eer},
         )
@@ -220,11 +294,6 @@ def save_best(
         wandb.run.summary["best_val_eer"] = eer
         wandb.run.summary["best_val_eer_epoch"] = epoch
         tqdm.write("  [wandb] best-model artifact logged")
-
-
-# ──────────────────────────────────────────────────────────────
-#  Training loop
-# ──────────────────────────────────────────────────────────────
 
 
 def train_one_epoch(
@@ -237,13 +306,10 @@ def train_one_epoch(
     scaler: torch.amp.GradScaler,
     device: torch.device,
     epoch: int,
-    global_step: int,
-    use_wandb: bool = True,
-) -> tuple[float, int]:
+) -> float:
     model.train()
     arcface_loss.train()
 
-    # DistributedSampler must be re-seeded each epoch for proper shuffling
     train_sampler.set_epoch(epoch)
 
     total_loss = 0.0
@@ -251,7 +317,7 @@ def train_one_epoch(
 
     pbar = tqdm(
         train_loader,
-        desc=f"Epoch {epoch:03d} [train]",
+        desc=f"[train] Epoch {epoch:03d}",
         leave=False,
         unit="batch",
         disable=not is_main(),
@@ -281,29 +347,13 @@ def train_one_epoch(
         loss_val = loss.item()
         lr_val = scheduler.get_last_lr()[0]
         total_loss += loss_val
-        global_step += 1
 
         pbar.set_postfix(loss=f"{loss_val:.4f}", lr=f"{lr_val:.2e}")
 
-        if use_wandb and is_main() and wandb.run is not None:
-            wandb.log(
-                {"train/loss_step": loss_val, "train/lr": lr_val},
-                step=global_step,
-            )
-
-    return total_loss / len(train_loader), global_step
+    return total_loss / len(train_loader)
 
 
-# ────────────────────────────────────────────────────────────
-#  Main
-# ────────────────────────────────────────────────────────────
-
-
-def main(cfg: dict, use_wandb: bool = True) -> None:
-    # ── DDP init ────────────────────────────────────────────────────────────
-    local_rank, world_size = setup_ddp()
-    device = torch.device("cuda", local_rank)
-
+def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
     general_cfg = cfg["general"]
     data_cfg = cfg["data"]
     model_cfg = cfg["model"]
@@ -315,31 +365,21 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
     wandb_cfg = cfg.get("wandb", {})
     evaluation_cfg = cfg["evaluation"]
 
-    set_seed(general_cfg["seed"] + local_rank)  # unique seed per rank
+    # ── DDP init ────────────────────────────────────────────────────────────
+    local_rank, world_size = setup_ddp()
+    device = torch.device("cuda", local_rank)
 
-    # ── wandb (rank-0 only) ─────────────────────────────────────────────────
-    if use_wandb and is_main():
-        api_key = wandb_cfg.get("api_key")
-        if not api_key or api_key == "your_wandb_api_key_here":
-            raise ValueError(
-                "wandb.api_key is not set in the config. "
-                "Add your key to config_recog.yaml or pass --no-wandb to skip."
-            )
-        wandb.login(key=api_key)
-        wandb.init(
-            project=wandb_cfg.get("project", "fingerprint-recognition"),
-            tags=["recog"],
-            config=cfg,
-            save_code=True,
-        )
-        tqdm.write(f"[wandb] run: {wandb.run.url}")
+    set_seed(general_cfg["seed"] + local_rank)
 
     if is_main():
         print(f"Device: {device}  |  world_size: {world_size}")
 
-    ckpt_dir = output_cfg["checkpoint_dir"]
-    if is_main():
-        os.makedirs(ckpt_dir, exist_ok=True)
+    # ── Wandb ─────────────────────────────────────────────────
+    if is_main() and not no_wandb and wandb_cfg.get("api_key"):
+        wandb.login(key=wandb_cfg["api_key"])
+        wandb.init(
+            project=wandb_cfg.get("project", "ViTUnified-Recognition"), config=cfg
+        )
 
     # ── transforms ──────────────────────────────────────────────────────────
     train_transform, eval_transform = get_transforms("all")
@@ -355,9 +395,13 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
         n_genuine_impressions=data_cfg["n_genuine_impressions"],
         n_impostor_impressions=data_cfg["n_impostor_impressions"],
         impostor_mode=data_cfg["impostor_mode"],
-        n_impostor_subset=data_cfg["n_impostor_subset"],
-        transform=eval_transform,
+        n_impostor_subset=None
+        if data_cfg["n_impostor_subset"] in ("None", None)
+        else data_cfg["n_impostor_subset"],
         seed=general_cfg["seed"],
+    )
+    unique_val_dataset = UniqueImageDataset(
+        idx_to_path=val_dataset.idx_to_path, transform=eval_transform
     )
 
     if is_main():
@@ -380,33 +424,44 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
         pin_memory=training_cfg["pin_memory"],
     )
 
-    val_sampler = DistributedSampler(
-        val_dataset,
-        num_replicas=world_size,
-        rank=local_rank,
-        shuffle=False,
-        drop_last=False
-    )
+    # val_sampler = DistributedSampler(
+    #     val_dataset,
+    #     num_replicas=world_size,
+    #     rank=local_rank,
+    #     shuffle=False,
+    #     drop_last=False,
+    # )
+
+    # val_loader = DataLoader(
+    #     val_dataset,
+    #     batch_size=evaluation_cfg["batch_size"],
+    #     sampler=val_sampler,
+    #     num_workers=training_cfg["num_workers"],
+    #     pin_memory=training_cfg["pin_memory"],
+    # )
 
     val_loader = DataLoader(
         val_dataset,
         batch_size=evaluation_cfg["batch_size"],
-        sampler=val_sampler,
+        shuffle=False,
         num_workers=training_cfg["num_workers"],
         pin_memory=training_cfg["pin_memory"],
     )
 
-    if use_wandb and is_main() and wandb.run is not None:
-        wandb.run.summary.update(
-            {
-                "dataset/train_samples": len(train_dataset),
-                "dataset/train_ids": len(train_dataset.id_to_label),
-                "dataset/val_pairs": len(val_dataset),
-                "training/world_size": world_size,
-                "training/per_gpu_batch": training_cfg["batch_size"],
-                "training/effective_batch": training_cfg["batch_size"] * world_size,
-            }
-        )
+    unique_val_sampler = DistributedSampler(
+        unique_val_dataset,
+        num_replicas=world_size,
+        rank=local_rank,
+        shuffle=False,
+        drop_last=False,
+    )
+    unique_val_loader = DataLoader(
+        unique_val_dataset,
+        batch_size=training_cfg["batch_size"],
+        sampler=unique_val_sampler,
+        num_workers=training_cfg["num_workers"],
+        pin_memory=training_cfg["pin_memory"],
+    )
 
     # ── model ─────────────────────────────────────────────────────────────────
     model = ViTUnified(
@@ -416,23 +471,22 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
         pad_dropout=model_cfg["pad_dropout"],
     ).to(device)
     model._freeze_pad_heads()
+    if is_main():
+        print("All PAD heads are frozen.")
     model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
-    if use_wandb and is_main() and wandb.run is not None:
-        wandb.watch(model, log="parameters", log_freq=100)
-
     # ── loss ──────────────────────────────────────────────────────────────────
-    num_ids = len(train_dataset.id_to_label)
+    n_ids = train_dataset.n_ids
     embed_dim = _unwrap(model).embed_dim
     arcface_loss = ArcFaceLoss(
         embed_dim=embed_dim,
-        num_classes=num_ids,
+        num_classes=n_ids,
         margin=loss_cfg["margin"],
         scale=loss_cfg["scale"],
     ).to(device)
     arcface_loss = DDP(arcface_loss, device_ids=[local_rank], output_device=local_rank)
 
-    # ── optimizer & scheduler& scaler ─────────────────────────────────────────────────
+    # ── optimizer & scheduler & scaler ─────────────────────────────────────────────────
     optimizer = AdamW(
         list(model.parameters()) + list(arcface_loss.parameters()),
         lr=opt_cfg["lr"],
@@ -451,12 +505,20 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
     scaler = torch.amp.GradScaler("cuda")
 
     # ── training loop ─────────────────────────────────────────────────────────
+    start_epoch = 1
     best_eer = float("inf")
-    ckpt_interval = training_cfg["checkpoint_interval"]
-    best_model_name = output_cfg["best_model_name"]
-    global_step = 0
+
+    if checkpoint is not None:
+        start_epoch, best_eer = load_checkpoint(
+            checkpoint, model, arcface_loss, optimizer, scheduler
+        )
 
     if is_main():
+        if not wandb.run:
+            history = {"epoch": [], "train_loss": [], "val_eer": []}
+
+        os.makedirs(output_cfg["checkpoint_dir"], exist_ok=True)
+
         print("\n" + "=" * 60)
         print(
             f"Starting training  (GPUs: {world_size}  |  "
@@ -465,13 +527,13 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
         print("=" * 60)
 
     epoch_pbar = tqdm(
-        range(1, training_cfg["epochs"] + 1),
+        range(start_epoch, training_cfg["epochs"] + 1),
         desc="Training",
         unit="epoch",
         disable=not is_main(),
     )
     for epoch in epoch_pbar:
-        avg_loss, global_step = train_one_epoch(
+        avg_loss = train_one_epoch(
             model,
             arcface_loss,
             train_loader,
@@ -481,13 +543,19 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
             scaler,
             device,
             epoch,
-            global_step,
-            use_wandb,
         )
 
         dist.barrier()
 
-        eer, thr = evaluate(_unwrap(model), val_loader, device, epoch)
+        # eer, thr = evaluate(
+        #     _unwrap(model), val_loader, unique_val_loader, device, epoch
+        # )
+
+        global_embeddings = get_embeddings(
+            _unwrap(model), unique_val_loader, device, epoch
+        )
+        if is_main():
+            eer, thr = evaluate(val_loader, global_embeddings, device, epoch)
 
         if is_main():
             epoch_pbar.set_postfix(
@@ -498,31 +566,35 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
                 f"val EER: {eer:.4f}  (threshold={thr:.4f})"
             )
 
-            if use_wandb and wandb.run is not None:
+            if wandb.run is not None:
                 wandb.log(
                     {
                         "train/loss_epoch": avg_loss,
                         "val/eer": eer,
                         "val/threshold": thr,
                         "epoch": epoch,
-                    },
-                    step=global_step,
+                    }
                 )
+            elif not wandb.run:
+                history["epoch"].append(epoch)
+                history["train_loss"].append(avg_loss)
+                history["val_eer"].append(eer)
 
             if eer < best_eer:
                 best_eer = eer
                 save_best(
-                    ckpt_dir,
-                    best_model_name,
+                    output_cfg["checkpoint_dir"],
+                    output_cfg["best_model_name"],
                     epoch,
                     model,
                     arcface_loss,
                     eer,
-                    use_wandb,
                 )
 
-            if epoch % ckpt_interval == 0:
-                ckpt_path = os.path.join(ckpt_dir, f"checkpoint_epoch{epoch:03d}.pth")
+            if epoch % training_cfg["checkpoint_interval"] == 0:
+                ckpt_path = os.path.join(
+                    output_cfg["checkpoint_dir"], f"checkpoint_epoch{epoch:03d}.pth"
+                )
                 save_checkpoint(
                     ckpt_path,
                     epoch,
@@ -530,8 +602,7 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
                     arcface_loss,
                     optimizer,
                     scheduler,
-                    best_eer,
-                    use_wandb,
+                    eer,
                 )
 
         dist.barrier()
@@ -541,13 +612,35 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
         print(f"Training complete. Best val EER: {best_eer:.4f}")
         print("=" * 60)
 
-        if use_wandb and wandb.run is not None:
+        if wandb.run is not None:
             wandb.finish()
+        else:
+            import matplotlib.pyplot as plt
+
+            fig, ax1 = plt.subplots(figsize=(10, 5))
+            ax2 = ax1.twinx()
+
+            ax1.plot(history["epoch"], history["train_loss"], "g-", label="Train Loss")
+            ax2.plot(history["epoch"], history["val_eer"], "b-", label="Val EER")
+
+            ax1.set_xlabel("Epoch")
+            ax1.set_ylabel("Train Loss", color="g")
+            ax2.set_ylabel("Val EER", color="b")
+
+            lines_1, labels_1 = ax1.get_legend_handles_labels()
+            lines_2, labels_2 = ax2.get_legend_handles_labels()
+            ax1.legend(lines_1 + lines_2, labels_1 + labels_2, loc="upper right")
+
+            plt.title("Training History")
+            plot_path = os.path.join(
+                output_cfg["checkpoint_dir"], "training_history.png"
+            )
+            plt.savefig(plot_path)
+            plt.close()
+            print(f"Saved training history plot to {plot_path}")
 
     cleanup_ddp()
 
-
-# ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Fingerprint Recognition Training")
@@ -562,7 +655,13 @@ if __name__ == "__main__":
         action="store_true",
         help="Disable Weights & Biases logging",
     )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help="Path to checkpoint to resume from",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    main(cfg, use_wandb=not args.no_wandb)
+    main(cfg, no_wandb=args.no_wandb, checkpoint=args.checkpoint)

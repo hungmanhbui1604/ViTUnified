@@ -2,8 +2,8 @@ general:
   seed: 42
 
 wandb:
-  api_key: "your_wandb_api_key_here"
-  project: "ViTUnified"
+  api_key: ""
+  project: "ViTUnified-Recognition"
 
 model:
   model_name: "vit_small_patch16_224"
@@ -33,21 +33,22 @@ training:
 data:
   data_root: "data/"
   split_path: "data/splits.json"
-  n_genuine_impressions: 8
+  n_genuine_impressions: 16
   n_impostor_impressions: 1
-  impostor_mode: "sub"
-  n_impostor_subset: 100
+  impostor_mode: "all"
+  n_impostor_subset: None
 
 output:
   checkpoint_dir: "ckpts/recog/"
-  best_model_name: "recog_best_eer.pth"
+  best_model_name: "best_model.pth"
 
 evaluation:
   batch_size: 256
+  unique_batch_size: 256
   num_workers: 8
   pin_memory: true
   n_genuine_impressions: 16
   n_impostor_impressions: 1
   impostor_mode: "all"
   n_impostor_subset: None
-  checkpoint_path: "ckpts/recog/recog_best_eer.pth"
+  checkpoint_path: "ckpts/recog/best_model.pth"

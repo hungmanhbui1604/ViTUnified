@@ -11,7 +11,6 @@ class SquarePad:
         hp = (max_wh - w) // 2
         vp = (max_wh - h) // 2
         padding = (hp, vp, max_wh - w - hp, max_wh - h - vp)
-        # For fingerprints, padding with 0 (black) or 255 (white) is best
         return F.pad(image, padding, fill=255, padding_mode="constant")
 
 

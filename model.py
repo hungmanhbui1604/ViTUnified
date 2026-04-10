@@ -79,5 +79,4 @@ class ViTUnified(nn.Module):
         for param in self.pad_heads.parameters():
             param.requires_grad = False
         
-        self.pad_heads.eval() 
-        print("All PAD heads have been frozen.")
+        self.pad_heads.eval()
