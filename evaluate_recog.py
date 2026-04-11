@@ -318,8 +318,6 @@ def main(args: argparse.Namespace) -> None:
     print(f"\nAll outputs written to: {args.output_dir}")
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Fingerprint Recognition Evaluation",

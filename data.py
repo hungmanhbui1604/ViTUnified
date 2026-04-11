@@ -728,7 +728,7 @@ if __name__ == "__main__":
         create_recog_splits(
             data_root="data/" + data_root,
             output_path=f"data/{data_root}/{output_path}_splits.json",
-            split_ratio=[0.75, 0.05, 0.2]
+            split_ratio=[0.7, 0.1, 0.2]
         )
         print()
 
@@ -774,7 +774,7 @@ if __name__ == "__main__":
         idx_to_path=val_dataset.idx_to_path,
         transform=transform,
     )
-    print(len(unique_val_dataset))
+    print(f"Number of unique images in val: {len(unique_val_dataset)}")
     print()
 
     test_dataset = RecogEvaluationDataset(
