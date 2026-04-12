@@ -31,7 +31,6 @@ training:
   checkpoint_interval: 20
 
 data:
-  data_root: "data/"
   split_path: "data/splits.json"
   n_genuine_impressions: 32
   n_impostor_impressions: 1

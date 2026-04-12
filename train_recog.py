@@ -155,6 +155,7 @@ def load_checkpoint(
     arcface_loss: DDP,
     optimizer: AdamW,
     scheduler: LambdaLR,
+    scaler: torch.amp.GradScaler,
 ) -> tuple[int, float]:
     start_epoch = 1
     best_eer = float("inf")
@@ -171,11 +172,13 @@ def load_checkpoint(
             scheduler.load_state_dict(ckpt_dict["scheduler"])
         if "epoch" in ckpt_dict:
             start_epoch = ckpt_dict["epoch"] + 1
+        if "scaler" in ckpt_dict:
+            scaler.load_state_dict(ckpt_dict["scaler"])
         if "eer" in ckpt_dict:
             best_eer = ckpt_dict["eer"]
 
         if is_main():
-            print(f"=> Loaded checkpoint (epoch {ckpt_dict['epoch']})")
+            print(f"=> Loaded checkpoint (epoch {start_epoch - 1})")
     else:
         if is_main():
             print(f"=> No checkpoint found at '{path}'")
@@ -190,6 +193,7 @@ def save_checkpoint(
     arcface_loss: DDP,
     optimizer: AdamW,
     scheduler: LambdaLR,
+    scaler: torch.amp.GradScaler,
     eer: float,
 ) -> None:
     torch.save(
@@ -199,6 +203,7 @@ def save_checkpoint(
             "arcface": _unwrap(arcface_loss).state_dict(),
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
+            "scaler": scaler.state_dict(),
             "eer": eer,
         },
         path,
@@ -447,7 +452,7 @@ def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
 
     if checkpoint is not None:
         start_epoch, best_eer = load_checkpoint(
-            checkpoint, model, arcface_loss, optimizer, scheduler
+            checkpoint, model, arcface_loss, optimizer, scheduler, scaler
         )
 
     if is_main():
@@ -535,6 +540,7 @@ def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
                     arcface_loss,
                     optimizer,
                     scheduler,
+                    scaler,
                     eer,
                 )
 

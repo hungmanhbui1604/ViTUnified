@@ -149,6 +149,7 @@ def load_checkpoint(
     model: DDP,
     optimizer: AdamW,
     scheduler: LambdaLR,
+    scaler: torch.amp.GradScaler,
 ) -> tuple[int, float]:
     start_epoch = 1
     best_ace = float("inf")
@@ -162,13 +163,15 @@ def load_checkpoint(
             optimizer.load_state_dict(ckpt_dict["optimizer"])
         if "scheduler" in ckpt_dict:
             scheduler.load_state_dict(ckpt_dict["scheduler"])
+        if "scaler" in ckpt_dict:
+            scaler.load_state_dict(ckpt_dict["scaler"])
         if "epoch" in ckpt_dict:
             start_epoch = ckpt_dict["epoch"] + 1
         if "ace" in ckpt_dict:
             best_ace = ckpt_dict["ace"]
 
         if is_main():
-            print(f"=> Loaded checkpoint (epoch {ckpt_dict['epoch']})")
+            print(f"=> Loaded checkpoint (epoch {start_epoch - 1})")
     else:
         if is_main():
             print(f"=> No checkpoint found at '{path}'")
@@ -182,8 +185,8 @@ def save_checkpoint(
     model: DDP,
     optimizer: AdamW,
     scheduler: LambdaLR,
+    scaler: torch.amp.GradScaler,
     ace: float,
-    use_wandb: bool = True,
 ) -> None:
     torch.save(
         {
@@ -191,6 +194,7 @@ def save_checkpoint(
             "model": _unwrap(model).state_dict(),
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
+            "scaler": scaler.state_dict(),
             "ace": ace,
         },
         path,
@@ -267,19 +271,19 @@ def train_one_epoch(
 
         optimizer.zero_grad(set_to_none=True)
 
-        # ── Student forward ──────────────────────────────────────────────────
+        # ── Forward passes & losses inside autocast for proper AMP ───────────
         with torch.autocast(device_type="cuda"):
             student_emb, pad_outputs = model(images)
 
-        # ── PAD cross-entropy loss (all heads) ───────────────────────────────
-        ce = pad_ce_loss(pad_outputs, labels)
+            with torch.no_grad():
+                teacher_emb, _ = teacher(images)
 
-        # ── Recog distillation: MSE vs frozen teacher embedding ──────────────
-        with torch.no_grad():
-            teacher_emb, _ = teacher(images)
+            # ── PAD cross-entropy loss (all heads) ───────────────────────────
+            ce = pad_ce_loss(pad_outputs, labels)
 
-        mse = recog_mse_loss(student_emb, teacher_emb)
-        loss = ce + lambda_mse * mse
+            # ── Recog distillation: MSE vs frozen teacher embedding ──────────
+            mse = recog_mse_loss(student_emb, teacher_emb)
+            loss = ce + lambda_mse * mse
 
         scaler.scale(loss).backward()
 
@@ -414,11 +418,11 @@ def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
     best_ace = float("inf")
 
     if checkpoint is not None:
-        start_epoch, best_ace = load_checkpoint(checkpoint, model, optimizer, scheduler)
+        start_epoch, best_ace = load_checkpoint(checkpoint, model, optimizer, scheduler, scaler)
 
     if is_main():
         if not wandb.run:
-            history = {"epoch": [], "train_loss": [], "val_eer": []}
+            history = {"epoch": [], "train_loss": [], "val_ace": []}
 
         os.makedirs(output_cfg["checkpoint_dir"], exist_ok=True)
 
@@ -501,6 +505,7 @@ def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
                     model,
                     optimizer,
                     scheduler,
+                    scaler,
                     metrics["val/ace"],
                 )
 

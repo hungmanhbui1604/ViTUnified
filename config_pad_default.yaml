@@ -31,9 +31,14 @@ loss:
   lambda_mse: 1.0
 
 data:
-  data_root: "data/LivDet"
   split_path: "data/LivDet/livdet_pad_splits.json"
 
 output:
   checkpoint_dir: "ckpts/pad/"
   best_model_name: "best_model.pth"
+
+evaluation:
+  batch_size: 256
+  num_workers: 8
+  pin_memory: true
+  checkpoint_path: "ckpts/pad/best_model.pth"

@@ -753,6 +753,7 @@ if __name__ == "__main__":
     #     split_path="data/splits.json", transform=transform
     # )
     # print(train_dataset)
+    # print()
 
     # val_dataset = RecogEvaluationDataset(
     #     split_path="data/splits.json",
@@ -775,53 +776,54 @@ if __name__ == "__main__":
     #     n_genuine_impressions=32
     # )
     # print(test_dataset)
+    # print()
 
-    data_root = "data/LivDet"
-    create_LivDet_splits(data_root=data_root, val_ratio=0.2)
-    print()
+    data_root = "data/LivDet/LivDet2015/CrossMatch"
+    create_LivDet_splits(data_root=data_root, val_ratio=0.2, min_samples=2)
+    # print()
 
-    train_dataset = PADDataset(
-        split_path="data/LivDet/livdet_pad_splits.json",
-        split="train",
-        transform=transform,
-    )
-    print(train_dataset)
-    print()
+    # train_dataset = PADDataset(
+    #     split_path="data/LivDet/livdet_pad_splits.json",
+    #     split="train",
+    #     transform=transform,
+    # )
+    # print(train_dataset)
+    # print()
 
-    val_dataset = PADDataset(
-        split_path="data/LivDet/livdet_pad_splits.json",
-        split="val",
-        transform=transform,
-    )
-    print(val_dataset)
-    print()
+    # val_dataset = PADDataset(
+    #     split_path="data/LivDet/livdet_pad_splits.json",
+    #     split="val",
+    #     transform=transform,
+    # )
+    # print(val_dataset)
+    # print()
 
-    test_dataset = PADDataset(
-        split_path="data/LivDet/livdet_pad_splits.json",
-        split="test",
-        transform=transform,
-    )
-    print(test_dataset)
-    print()
+    # test_dataset = PADDataset(
+    #     split_path="data/LivDet/livdet_pad_splits.json",
+    #     split="test",
+    #     transform=transform,
+    # )
+    # print(test_dataset)
+    # print()
 
-    val_dataset = RecogEvaluationDataset(
-        split_path="data/LivDet/livdet_recog_splits.json",
-        split="val",
-        n_genuine_impressions=32
-    )
-    print(val_dataset)
-    print()
+    # val_dataset = RecogEvaluationDataset(
+    #     split_path="data/LivDet/livdet_recog_splits.json",
+    #     split="val",
+    #     n_genuine_impressions=32
+    # )
+    # print(val_dataset)
+    # print()
 
-    unique_val_dataset = UniqueImageDataset(
-        idx_to_path=val_dataset.idx_to_path,
-        transform=transform,
-    )
-    print(f"Number of unique images in val: {len(unique_val_dataset)}")
-    print()
+    # unique_val_dataset = UniqueImageDataset(
+    #     idx_to_path=val_dataset.idx_to_path,
+    #     transform=transform,
+    # )
+    # print(f"Number of unique images in val: {len(unique_val_dataset)}")
+    # print()
 
-    test_dataset = RecogEvaluationDataset(
-        split_path="data/LivDet/livdet_recog_splits.json",
-        split="test",
-        n_genuine_impressions=32
-    )
-    print(test_dataset)
+    # test_dataset = RecogEvaluationDataset(
+    #     split_path="data/LivDet/livdet_recog_splits.json",
+    #     split="test",
+    #     n_genuine_impressions=32
+    # )
+    # print(test_dataset)
