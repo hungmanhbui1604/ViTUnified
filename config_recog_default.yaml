@@ -24,7 +24,7 @@ scheduler:
   min_lr: 1.0e-5
 
 training:
-  epochs: 100
+  epochs: 80
   batch_size: 256
   num_workers: 8
   pin_memory: true
@@ -33,7 +33,7 @@ training:
 data:
   data_root: "data/"
   split_path: "data/splits.json"
-  n_genuine_impressions: 16
+  n_genuine_impressions: 32
   n_impostor_impressions: 1
   impostor_mode: "all"
   n_impostor_subset: None
@@ -43,11 +43,11 @@ output:
   best_model_name: "best_model.pth"
 
 evaluation:
-  batch_size: 256
+  batch_size: 1024
   unique_batch_size: 256
   num_workers: 8
   pin_memory: true
-  n_genuine_impressions: 16
+  n_genuine_impressions: 32
   n_impostor_impressions: 1
   impostor_mode: "all"
   n_impostor_subset: None

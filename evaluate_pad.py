@@ -1,35 +1,3 @@
-"""
-evaluate_pad.py — Fingerprint PAD Evaluation
-=============================================
-Loads a trained ViTUnified checkpoint and evaluates it on the LivDet PAD splits,
-producing the following metrics and artefacts per sensor and overall:
-
-Metrics (printed + saved to JSON)
-  • Accuracy
-  • APCER  (Attack Presentation Classification Error Rate) — spoof→live errors
-  • BPCER  (Bona-fide Presentation Classification Error Rate) — live→spoof errors
-  • ACE    (Average Classification Error) = (APCER + BPCER) / 2
-
-Plots (saved as PNG)
-  • Grouped bar chart of APCER / BPCER / ACE per sensor
-  • Confusion matrix (overall)
-
-Usage
------
-python evaluate_pad.py --config config_pad_default.yaml \
-                       --checkpoint ckpts/pad/pad_best_ace.pth
-
-# choose a single sensor test key
-python evaluate_pad.py --config config_pad_default.yaml \
-                       --checkpoint ckpts/pad/pad_best_ace.pth \
-                       --sensor livdet2015_CrossMatch
-
-# evaluate on the shared val split instead of sensor test splits
-python evaluate_pad.py --config config_pad_default.yaml \
-                       --checkpoint ckpts/pad/pad_best_ace.pth \
-                       --split val
-"""
-
 import argparse
 import json
 import os
@@ -39,18 +7,16 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.nn.functional as F
 import yaml
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from data import PADDataset
+from metrics import compute_recog_metrics
 from model import ViTUnified
 from transforms import get_transforms
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-#  Helpers
-# ──────────────────────────────────────────────────────────────────────────────
 
 def load_config(path: str) -> dict:
     with open(path) as f:
@@ -73,52 +39,36 @@ def load_model(ckpt_path: str, model_cfg: dict, device: torch.device) -> ViTUnif
     return model
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-#  Inference — collect predictions and labels for one split / sensor key
-# ──────────────────────────────────────────────────────────────────────────────
-
 @torch.no_grad()
-def collect_preds(
+def collect_scores(
     model: ViTUnified,
     loader: DataLoader,
     device: torch.device,
     desc: str = "Inference",
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Returns
-    -------
-    preds  : (N,) predicted class (0=live, 1=spoof)
-    labels : (N,) ground-truth class
-    """
-    all_preds, all_labels = [], []
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    model.eval()
+    
+    all_scores, all_preds, all_labels = [], [], []
 
-    for images, labels in tqdm(loader, desc=desc, unit="batch", leave=False):
+    for images, labels in tqdm(loader, desc=desc, unit="batch"):
         images = images.to(device, non_blocking=True)
 
         _, pad_outputs = model(images)
 
         # ensemble: average logits across all PAD heads
         ensemble_logits = torch.stack(pad_outputs, dim=0).mean(dim=0)   # (B, C)
+        
         preds = ensemble_logits.argmax(dim=1).cpu().numpy()
+        scores = F.softmax(ensemble_logits, dim=1)[:, 1].cpu().numpy()  # prob of spoof
 
+        all_scores.append(scores)
         all_preds.append(preds)
-        all_labels.append(labels.numpy())
+        all_labels.append(labels.cpu().numpy())
 
-    return np.concatenate(all_preds), np.concatenate(all_labels)
+    return np.concatenate(all_scores), np.concatenate(all_preds), np.concatenate(all_labels)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-#  Metric computation
-# ──────────────────────────────────────────────────────────────────────────────
-
-def compute_pad_metrics(preds: np.ndarray, labels: np.ndarray) -> dict:
-    """
-    Labels: 0 = live (bona fide), 1 = spoof (attack)
-
-    APCER  = spoof samples classified as live / total spoof samples
-    BPCER  = live  samples classified as spoof / total live  samples
-    ACE    = (APCER + BPCER) / 2
-    """
+def compute_pad_metrics(preds: np.ndarray, scores: np.ndarray, labels: np.ndarray) -> dict:
     n_total  = len(labels)
     n_live   = int((labels == 0).sum())
     n_spoof  = int((labels == 1).sum())
@@ -135,6 +85,9 @@ def compute_pad_metrics(preds: np.ndarray, labels: np.ndarray) -> dict:
     bpcer    = fp / n_live  if n_live  > 0 else 0.0   # live→spoof errors
     ace      = (apcer + bpcer) / 2.0
 
+    # ROC/DET metrics (from metrics.py, mapping FMR->BPCER, FNMR->APCER since spoof=1)
+    curve_metrics = compute_recog_metrics(scores, labels)
+
     return {
         "n_total"  : n_total,
         "n_live"   : n_live,
@@ -147,94 +100,29 @@ def compute_pad_metrics(preds: np.ndarray, labels: np.ndarray) -> dict:
         "APCER"    : float(apcer),
         "BPCER"    : float(bpcer),
         "ACE"      : float(ace),
+        # Curve metrics
+        "thresholds" : curve_metrics["thresholds"],
+        "BPCER_curve": curve_metrics["FMR"],    # FPR
+        "APCER_curve": curve_metrics["FNMR"],   # FNR
+        "EER"        : curve_metrics["EER"],
+        "EER_threshold": curve_metrics["EER_threshold"],
+        "AUC"        : curve_metrics["AUC"],
     }
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-#  Plotting
-# ──────────────────────────────────────────────────────────────────────────────
 
 def _style():
     plt.rcParams.update({
         "figure.dpi"       : 150,
         "axes.spines.top"  : False,
         "axes.spines.right": False,
-        "font.size"        : 10,
+        "font.size"        : 11,
     })
-
-
-def plot_sensor_bars(
-    sensor_metrics: dict[str, dict],
-    overall_metrics: dict,
-    output_dir: str,
-) -> str:
-    """Grouped bar chart: APCER / BPCER / ACE per sensor + overall."""
-    _style()
-
-    sensor_names = list(sensor_metrics.keys()) + ["OVERALL"]
-    apcer_vals   = [m["APCER"] for m in sensor_metrics.values()] + [overall_metrics["APCER"]]
-    bpcer_vals   = [m["BPCER"] for m in sensor_metrics.values()] + [overall_metrics["BPCER"]]
-    ace_vals     = [m["ACE"]   for m in sensor_metrics.values()] + [overall_metrics["ACE"]]
-
-    x      = np.arange(len(sensor_names))
-    width  = 0.25
-
-    fig, ax = plt.subplots(figsize=(max(10, len(sensor_names) * 1.4), 5))
-
-    bars_apcer = ax.bar(x - width, apcer_vals, width, label="APCER", color="#DC2626", alpha=0.85)
-    bars_bpcer = ax.bar(x,         bpcer_vals, width, label="BPCER", color="#2563EB", alpha=0.85)
-    bars_ace   = ax.bar(x + width, ace_vals,   width, label="ACE",   color="#7C3AED", alpha=0.85)
-
-    def _label_bars(bars):
-        for bar in bars:
-            h = bar.get_height()
-            ax.annotate(
-                f"{h:.3f}",
-                xy=(bar.get_x() + bar.get_width() / 2, h),
-                xytext=(0, 3),
-                textcoords="offset points",
-                ha="center",
-                va="bottom",
-                fontsize=7,
-            )
-
-    _label_bars(bars_apcer)
-    _label_bars(bars_bpcer)
-    _label_bars(bars_ace)
-
-    ax.set_xticks(x)
-    ax.set_xticklabels(
-        [s.replace("livdet", "LD") for s in sensor_names],
-        rotation=35,
-        ha="right",
-        fontsize=8,
-    )
-    ax.set_ylabel("Error Rate")
-    ax.set_ylim(0, min(1.15, max(apcer_vals + bpcer_vals + ace_vals) * 1.25 + 0.05))
-    ax.set_title("PAD Metrics per Sensor")
-    ax.legend()
-    ax.grid(axis="y", alpha=0.3)
-
-    # highlight the OVERALL group
-    ax.axvspan(
-        x[-1] - width * 1.7,
-        x[-1] + width * 1.7,
-        color="gold",
-        alpha=0.15,
-        zorder=0,
-    )
-
-    path = os.path.join(output_dir, "pad_sensor_bars.png")
-    fig.savefig(path, bbox_inches="tight")
-    plt.close(fig)
-    print(f"[plot] sensor bar chart saved → {path}")
-    return path
 
 
 def plot_confusion_matrix(
     metrics: dict,
     output_dir: str,
-    title: str = "Confusion Matrix (Overall)",
+    title: str = "Confusion Matrix",
 ) -> str:
     _style()
     cm = np.array(
@@ -275,76 +163,142 @@ def plot_confusion_matrix(
     return path
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-#  Sensor-level evaluation helper
-# ──────────────────────────────────────────────────────────────────────────────
+def plot_roc(metrics: dict, output_dir: str) -> str:
+    bpcer = np.array(metrics["BPCER_curve"])
+    apcer = np.array(metrics["APCER_curve"])
+    eer = metrics["EER"]
+    auc = metrics["AUC"]
 
-def evaluate_split(
-    model: ViTUnified,
-    json_path: str,
-    split_key: str,
-    eval_transform,
-    device: torch.device,
-    batch_size: int,
-    num_workers: int,
-) -> dict | None:
-    """
-    Evaluates a single split key from the PAD JSON.
-    Returns the metrics dict, or None if the split is empty / missing.
-    """
-    try:
-        dataset = PADDataset(
-            json_path=json_path,
-            split=split_key,
-            transform=eval_transform,
-        )
-    except AssertionError:
-        return None   # split key not in JSON
-
-    if len(dataset) == 0:
-        return None
-
-    loader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=(device.type == "cuda"),
+    fig, ax = plt.subplots(figsize=(6, 6))
+    
+    # Normally ROC is TPR vs FPR, so 1 - APCER vs BPCER
+    # We plot (1 - APCER) which is True Spoof Rate vs BPCER
+    tpr = 1.0 - apcer
+    ax.plot(bpcer, tpr, lw=2, color="#2563EB", label=f"ROC  (AUC={auc:.4f})")
+    
+    # Plot EER point
+    ax.scatter(
+        [eer],
+        [1 - eer],
+        zorder=6,
+        s=80,
+        color="grey",
+        marker="x",
+        label=f"EER point ({eer:.4f}, {1 - eer:.4f})",
     )
 
-    preds, labels = collect_preds(model, loader, device, desc=split_key)
-    return compute_pad_metrics(preds, labels)
+    ax.set_xlabel("BPCER  (False Positive Rate)")
+    ax.set_ylabel("True Spoof Rate  (1 - APCER)")
+    ax.set_title("ROC Curve — Fingerprint PAD")
+    ax.legend(fontsize=9)
+    ax.set_xlim(-0.01, 1.01)
+    ax.set_ylim(-0.01, 1.01)
+    ax.grid(alpha=0.3)
+
+    path = os.path.join(output_dir, "pad_roc_curve.png")
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[plot] ROC curve saved → {path}")
+    return path
+
+
+def plot_det(metrics: dict, output_dir: str) -> str:
+    """DET curve: APCER vs BPCER on a log-log scale."""
+    bpcer = np.array(metrics["BPCER_curve"])
+    apcer = np.array(metrics["APCER_curve"])
+    eer = metrics["EER"]
+
+    # clip to avoid log(0)
+    bpcer_plot = np.clip(bpcer, 1e-5, 1.0)
+    apcer_plot = np.clip(apcer, 1e-5, 1.0)
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.plot(bpcer_plot, apcer_plot, lw=2, color="#7C3AED", label="DET")
+    ax.plot(
+        [eer],
+        [eer],
+        "o",
+        color="#DC2626",
+        zorder=6,
+        label=f"EER = {eer:.4f}",
+        markersize=8,
+    )
+    ax.plot([1e-5, 1.0], [1e-5, 1.0], "--", color="grey", lw=1, alpha=0.6)
+
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlim(1e-5, 1.0)
+    ax.set_ylim(1e-5, 1.0)
+    ax.set_xlabel("BPCER  (False Positive Rate)")
+    ax.set_ylabel("APCER  (False Negative Rate)")
+    ax.set_title("DET Curve — Fingerprint PAD")
+    ax.legend(fontsize=9)
+    ax.grid(alpha=0.3, which="both")
+
+    path = os.path.join(output_dir, "pad_det_curve.png")
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[plot] DET curve saved → {path}")
+    return path
+
+
+def plot_score_dist(
+    scores: np.ndarray,
+    labels: np.ndarray,
+    eer_thr: float,
+    output_dir: str,
+) -> str:
+    spoof_scores = scores[labels == 1]
+    live_scores = scores[labels == 0]
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    bins = np.linspace(0, 1, 80)
+    ax.hist(
+        live_scores,
+        bins=bins,
+        alpha=0.6,
+        color="#16A34A",
+        label=f"Live  (n={len(live_scores):,})",
+        density=True,
+    )
+    ax.hist(
+        spoof_scores,
+        bins=bins,
+        alpha=0.6,
+        color="#DC2626",
+        label=f"Spoof (n={len(spoof_scores):,})",
+        density=True,
+    )
+    ax.axvline(
+        eer_thr, color="black", ls="--", lw=1.5, label=f"EER threshold = {eer_thr:.4f}"
+    )
+
+    ax.set_xlabel("Predicted Probability of Spoof")
+    ax.set_ylabel("Density")
+    ax.set_title("Score Distributions — Fingerprint PAD")
+    ax.legend(fontsize=9)
+    ax.grid(alpha=0.3)
+
+    path = os.path.join(output_dir, "pad_score_distributions.png")
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[plot] Score distributions saved → {path}")
+    return path
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  Main
 # ──────────────────────────────────────────────────────────────────────────────
 
-SENSOR_TEST_KEYS = [
-    "test_livdet2011_Biometrika",
-    "test_livdet2011_Digital",
-    "test_livdet2011_Italdata",
-    "test_livdet2011_Sagem",
-    "test_livdet2013_Biometrika",
-    "test_livdet2013_CrossMatch",
-    "test_livdet2013_Italdata",
-    "test_livdet2015_CrossMatch",
-    "test_livdet2015_DigitalPersona",
-    "test_livdet2015_GreenBit",
-    "test_livdet2015_HiScan",
-]
-
-
 def main(args: argparse.Namespace) -> None:
     # ── setup ────────────────────────────────────────────────────────────────
     cfg       = load_config(args.config)
     model_cfg = cfg["model"]
-    data_cfg  = cfg["data"]
 
     device = torch.device(
         args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu")
     )
-    print(f"Device: {device}")
+    print(f"\nDevice: {device}")
 
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -354,100 +308,72 @@ def main(args: argparse.Namespace) -> None:
     # ── transforms ───────────────────────────────────────────────────────────
     _, eval_transform = get_transforms("all")
 
-    pad_json = data_cfg["pad_splits"]
-
-    # ── determine which splits to evaluate ───────────────────────────────────
-    if args.split:
-        # user specified a single split key directly (e.g. 'val')
-        split_keys = [args.split]
-        per_sensor = False
-    elif args.sensor:
-        # user specified a sensor shorthand (e.g. 'livdet2015_CrossMatch')
-        split_keys = [f"test_{args.sensor}"]
-        per_sensor = False
-    else:
-        # default: evaluate all sensor test splits
-        split_keys = SENSOR_TEST_KEYS
-        per_sensor = True
-
-    # ── evaluate ─────────────────────────────────────────────────────────────
-    all_preds_list, all_labels_list = [], []
-    sensor_metrics: dict[str, dict] = {}
-
-    print()
-    for key in split_keys:
-        m = evaluate_split(
-            model, pad_json, key, eval_transform, device,
-            args.batch_size, args.num_workers,
-        )
-        if m is None:
-            print(f"  [skip] '{key}' — not found or empty in {pad_json}")
-            continue
-
-        sensor_metrics[key] = m
-        print(
-            f"  {key:<42s}  "
-            f"n={m['n_total']:>5,}  "
-            f"ACC={m['accuracy']:.4f}  "
-            f"APCER={m['APCER']:.4f}  "
-            f"BPCER={m['BPCER']:.4f}  "
-            f"ACE={m['ACE']:.4f}"
-        )
-
-        # accumulate for overall stats
-        # rebuild pred / label arrays from TP/TN/FP/FN counts
-        _preds  = np.array(
-            [1] * m["TP"] + [0] * m["FN"] +   # true spoof
-            [0] * m["TN"] + [1] * m["FP"]      # true live
-        )
-        _labels = np.array(
-            [1] * m["TP"] + [1] * m["FN"] +
-            [0] * m["TN"] + [0] * m["FP"]
-        )
-        all_preds_list.append(_preds)
-        all_labels_list.append(_labels)
-
-    if not sensor_metrics:
-        print("No valid splits found. Check --config / --split / --sensor.")
+    # ── dataset ──────────────────────────────────────────────────────────────
+    dataset = PADDataset(
+        split_path=args.split_path,
+        split=args.split,
+        transform=eval_transform,
+    )
+    
+    if len(dataset) == 0:
+        print(f"No samples found in split '{args.split}' from '{args.split_path}'.")
         return
+        
+    print(f"\n{dataset}")
 
-    # ── overall metrics (pooled across all evaluated splits) ─────────────────
-    all_preds  = np.concatenate(all_preds_list)
-    all_labels = np.concatenate(all_labels_list)
-    overall    = compute_pad_metrics(all_preds, all_labels)
+    loader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=(device.type == "cuda"),
+    )
 
-    print()
-    print("=" * 60)
-    print(f"  OVERALL  ({len(sensor_metrics)} sensor(s))")
-    print(f"  Samples  : {overall['n_total']:,}  "
-          f"(live={overall['n_live']:,}  spoof={overall['n_spoof']:,})")
-    print(f"  Accuracy : {overall['accuracy']:.4f}")
-    print(f"  APCER    : {overall['APCER']:.4f}")
-    print(f"  BPCER    : {overall['BPCER']:.4f}")
-    print(f"  ACE      : {overall['ACE']:.4f}")
-    print("=" * 60)
+    # ── inference ────────────────────────────────────────────────────────────
+    scores, preds, labels = collect_scores(model, loader, device, desc=args.split)
+    
+    # ── metrics ──────────────────────────────────────────────────────────────
+    metrics = compute_pad_metrics(preds, scores, labels)
+
+    print("\n" + "=" * 50)
+    print(f"Split path: {args.split_path}")
+    print(f"Split: '{args.split}'")
+    print(f"Samples: {metrics['n_total']:,} (live={metrics['n_live']:,}, spoof={metrics['n_spoof']:,})")
+    print("-" * 50)
+    print(f"Accuracy : {metrics['accuracy']:.4f}")
+    print(f"APCER    : {metrics['APCER']:.4f}  (argmax threshold)")
+    print(f"BPCER    : {metrics['BPCER']:.4f}  (argmax threshold)")
+    print(f"ACE      : {metrics['ACE']:.4f}  (argmax threshold)")
+    print("-" * 50)
+    print(f"EER      : {metrics['EER']:.4f}  (threshold={metrics['EER_threshold']:.4f})")
+    print(f"AUC (ROC): {metrics['AUC']:.4f}")
+    print("=" * 50)
 
     # ── save JSON ─────────────────────────────────────────────────────────────
+    # Remove large arrays before saving JSON
+    summary_metrics = {k: v for k, v in metrics.items() if k not in ("thresholds", "BPCER_curve", "APCER_curve")}
+
     results = {
-        "checkpoint" : args.checkpoint,
-        "overall"    : overall,
-        "per_sensor" : sensor_metrics,
+        "checkpoint": args.checkpoint,
+        "split_path": args.split_path,
+        "split": args.split,
+        "metrics": summary_metrics,
     }
+    
     json_path = os.path.join(args.output_dir, "pad_metrics.json")
     with open(json_path, "w") as f:
         json.dump(results, f, indent=2)
-    print(f"\n[results] metrics saved → {json_path}")
+    print(f"\nResults saved → {json_path}")
 
     # ── plots ────────────────────────────────────────────────────────────────
-    if per_sensor and len(sensor_metrics) > 1:
-        plot_sensor_bars(sensor_metrics, overall, args.output_dir)
-
-    plot_confusion_matrix(overall, args.output_dir, title="Confusion Matrix (Overall)")
+    _style()
+    plot_confusion_matrix(metrics, args.output_dir)
+    plot_roc(metrics, args.output_dir)
+    plot_det(metrics, args.output_dir)
+    plot_score_dist(scores, labels, metrics["EER_threshold"], args.output_dir)
 
     print(f"\nAll outputs written to: {os.path.abspath(args.output_dir)}")
 
-
-# ──────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -464,21 +390,15 @@ if __name__ == "__main__":
         required=True,
         help="Path to the trained PAD model checkpoint (.pth)",
     )
-
-    # ── split selection (mutually exclusive) ─────────────────────────────────
-    split_group = parser.add_mutually_exclusive_group()
-    split_group.add_argument(
-        "--split",
-        default=None,
-        help="Evaluate a single named split key (e.g. 'val', 'train')",
+    parser.add_argument(
+        "--split-path",
+        required=True,
+        help="Path to the PAD split JSON file",
     )
-    split_group.add_argument(
-        "--sensor",
-        default=None,
-        help=(
-            "Evaluate a single sensor by shorthand, e.g. 'livdet2015_CrossMatch'. "
-            "The key 'test_<sensor>' will be looked up in the JSON."        
-        ),
+    parser.add_argument(
+        "--split",
+        default="test",
+        help="Which split to evaluate (e.g. 'test', 'val')",
     )
     parser.add_argument(
         "--output-dir",

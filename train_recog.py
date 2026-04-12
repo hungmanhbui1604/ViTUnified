@@ -50,28 +50,6 @@ def load_config(path: str) -> dict:
         return yaml.safe_load(f)
 
 
-# @torch.no_grad()
-# def compute_eer(pos_hist: torch.Tensor, neg_hist: torch.Tensor, bins: torch.Tensor):
-#     pos_total = pos_hist.sum()
-#     neg_total = neg_hist.sum()
-
-#     pos_cum = torch.cumsum(pos_hist.flip(0), dim=0).flip(0)
-#     tar = pos_cum / pos_total
-
-#     neg_cum = torch.cumsum(neg_hist, dim=0)
-#     tnr = neg_cum / neg_total
-
-#     diff = torch.abs(tar - tnr)
-#     idx = torch.argmin(diff)
-
-#     eer = 1.0 - (tar[idx] + tnr[idx]) / 2.0
-
-#     bin_centers = (bins[:-1] + bins[1:]) / 2.0
-#     thr = bin_centers[idx]
-
-#     return eer.item(), thr.item()
-
-
 @torch.no_grad()
 def compute_eer(
     scores: np.ndarray,
@@ -143,15 +121,6 @@ def evaluate(
     device: torch.device,
     epoch: int,
 ) -> tuple[float, float]:
-
-    # n_bins = 10000
-    # min_val, max_val = -1.0, 1.0
-
-    # pos_hist = torch.zeros(n_bins, device=device)
-    # neg_hist = torch.zeros(n_bins, device=device)
-
-    # bin_edges = torch.linspace(min_val, max_val, steps=n_bins + 1, device=device)
-
     all_scores, all_labels = [], []
 
     pbar_pairs = tqdm(
@@ -163,8 +132,6 @@ def evaluate(
     )
 
     for idx_a, idx_b, labels in pbar_pairs:
-        # labels = labels.to(device, non_blocking=True)
-
         emb_a = global_embeddings[idx_a]
         emb_b = global_embeddings[idx_b]
 
@@ -172,21 +139,6 @@ def evaluate(
 
         all_scores.append(cos_sim.cpu().numpy())
         all_labels.append(labels.numpy())
-
-        # pos_scores = cos_sim[labels == 1]
-        # neg_scores = cos_sim[labels == 0]
-
-        # if pos_scores.numel() > 0:
-        #     pos_hist += torch.histc(pos_scores, bins=n_bins, min=min_val, max=max_val)
-
-        # if neg_scores.numel() > 0:
-        #     neg_hist += torch.histc(neg_scores, bins=n_bins, min=min_val, max=max_val)
-
-    # if dist.is_available() and dist.is_initialized():
-    #     dist.all_reduce(pos_hist, op=dist.ReduceOp.SUM)
-    #     dist.all_reduce(neg_hist, op=dist.ReduceOp.SUM)
-
-    # eer, thr = compute_eer(pos_hist, neg_hist, bin_edges)
 
     eer, thr = compute_eer(np.concatenate(all_scores), np.concatenate(all_labels))
 
@@ -221,6 +173,7 @@ def load_checkpoint(
             start_epoch = ckpt_dict["epoch"] + 1
         if "eer" in ckpt_dict:
             best_eer = ckpt_dict["eer"]
+
         if is_main():
             print(f"=> Loaded checkpoint (epoch {ckpt_dict['epoch']})")
     else:
@@ -362,7 +315,7 @@ def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
     opt_cfg = cfg["optimizer"]
     sched_cfg = cfg["scheduler"]
     output_cfg = cfg["output"]
-    wandb_cfg = cfg.get("wandb", {})
+    wandb_cfg = cfg["wandb"]
     evaluation_cfg = cfg["evaluation"]
 
     # ── DDP init ────────────────────────────────────────────────────────────
@@ -423,22 +376,6 @@ def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
         num_workers=training_cfg["num_workers"],
         pin_memory=training_cfg["pin_memory"],
     )
-
-    # val_sampler = DistributedSampler(
-    #     val_dataset,
-    #     num_replicas=world_size,
-    #     rank=local_rank,
-    #     shuffle=False,
-    #     drop_last=False,
-    # )
-
-    # val_loader = DataLoader(
-    #     val_dataset,
-    #     batch_size=evaluation_cfg["batch_size"],
-    #     sampler=val_sampler,
-    #     num_workers=training_cfg["num_workers"],
-    #     pin_memory=training_cfg["pin_memory"],
-    # )
 
     val_loader = DataLoader(
         val_dataset,
@@ -547,17 +484,13 @@ def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
 
         dist.barrier()
 
-        # eer, thr = evaluate(
-        #     _unwrap(model), val_loader, unique_val_loader, device, epoch
-        # )
-
         global_embeddings = get_embeddings(
             _unwrap(model), unique_val_loader, device, epoch
-        )
+        )        
+
         if is_main():
             eer, thr = evaluate(val_loader, global_embeddings, device, epoch)
 
-        if is_main():
             epoch_pbar.set_postfix(
                 loss=f"{avg_loss:.4f}", eer=f"{eer:.4f}", thr=f"{thr:.4f}"
             )
@@ -575,7 +508,7 @@ def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
                         "epoch": epoch,
                     }
                 )
-            elif not wandb.run:
+            else:
                 history["epoch"].append(epoch)
                 history["train_loss"].append(avg_loss)
                 history["val_eer"].append(eer)

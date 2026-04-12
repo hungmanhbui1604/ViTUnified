@@ -7,6 +7,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
+import wandb
 import yaml
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
@@ -15,21 +16,16 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
-import wandb
-from data import PADDataset, create_LivDet_PAD_splits, create_LivDet_recog_splits
+from data import PADDataset
 from model import ViTUnified
 from schedulers import polynomial_scheduler
 from transforms import get_transforms
 
-# ────────────────────────────────────────────────────────────
-#  DDP helpers
-# ────────────────────────────────────────────────────────────
-
 
 def setup_ddp() -> tuple[int, int]:
-    dist.init_process_group(backend="nccl")
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend="nccl", device_id=local_rank)
     return local_rank, dist.get_world_size()
 
 
@@ -39,11 +35,6 @@ def cleanup_ddp() -> None:
 
 def is_main() -> bool:
     return not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0
-
-
-# ────────────────────────────────────────────────────────────
-#  Misc helpers
-# ────────────────────────────────────────────────────────────
 
 
 def set_seed(seed: int) -> None:
@@ -62,23 +53,14 @@ def _unwrap(module):
     return module.module if isinstance(module, DDP) else module
 
 
-# ────────────────────────────────────────────────────────────
-#  Load pretrained recognition model (teacher, frozen)
-# ────────────────────────────────────────────────────────────
-
-
 def load_pretrained_recog(
     ckpt_path: str,
     model_cfg: dict,
     device: torch.device,
 ) -> ViTUnified:
-    """
-    Loads the best recognition checkpoint and returns a fully frozen model
-    that serves as teacher for the MSE distillation loss on the final embedding.
-    """
     teacher = ViTUnified(
         model_name=model_cfg["model_name"],
-        pretrained=False,  # weights come from checkpoint
+        pretrained=False,
         num_classes=model_cfg["num_classes"],
         pad_dropout=model_cfg["pad_dropout"],
     ).to(device)
@@ -86,29 +68,14 @@ def load_pretrained_recog(
     ckpt = torch.load(ckpt_path, map_location=device)
     teacher.load_state_dict(ckpt["model"])
 
-    for param in teacher.parameters():
-        param.requires_grad = False
     teacher.eval()
-
     if is_main():
-        tqdm.write(
-            f"[teacher] loaded from '{ckpt_path}' (epoch {ckpt.get('epoch', '?')})"
-        )
+        tqdm.write(f"[teacher] loaded from '{ckpt_path}'")
 
     return teacher
 
 
-# ────────────────────────────────────────────────────────────
-#  Loss helpers
-# ────────────────────────────────────────────────────────────
-
-
 def pad_ce_loss(pad_outputs: list[torch.Tensor], labels: torch.Tensor) -> torch.Tensor:
-    """
-    Average cross-entropy loss over all PAD head outputs.
-    pad_outputs: list of (B, num_classes) tensors, one per transformer block.
-    labels:      (B,) int64 tensor  — 0=live, 1=spoof.
-    """
     loss = sum(F.cross_entropy(logits, labels) for logits in pad_outputs)
     return loss / len(pad_outputs)
 
@@ -117,34 +84,18 @@ def recog_mse_loss(
     student_emb: torch.Tensor,
     teacher_emb: torch.Tensor,
 ) -> torch.Tensor:
-    """
-    MSE between L2-normalised student and teacher final embeddings.
-    Penalises forgetting recognition structure while learning PAD.
-    """
     student_norm = F.normalize(student_emb, p=2, dim=1)
     teacher_norm = F.normalize(teacher_emb, p=2, dim=1)
     return F.mse_loss(student_norm, teacher_norm)
 
 
-# ────────────────────────────────────────────────────────────
-#  Evaluation
-# ────────────────────────────────────────────────────────────
-
-
 @torch.no_grad()
 def evaluate(
-    model: DDP,
+    model: nn.Module,
     val_loader: DataLoader,
     device: torch.device,
     epoch: int,
 ) -> dict[str, float]:
-    """
-    Returns average CE loss and ACE (Average Classification Error).
-    ACE = (APCER + BPCER) / 2, where:
-      APCER = spoof samples misclassified as live / total spoof samples
-      BPCER = live  samples misclassified as spoof / total live  samples
-    Logits are ensembled by averaging across all PAD heads.
-    """
     model.eval()
 
     total_loss = 0.0
@@ -164,7 +115,6 @@ def evaluate(
 
         _, pad_outputs = model(images)
 
-        # Ensemble: average logits across all PAD heads
         ensemble_logits = torch.stack(pad_outputs, dim=0).mean(dim=0)  # (B, C)
 
         total_loss += pad_ce_loss(pad_outputs, labels).item()
@@ -178,11 +128,9 @@ def evaluate(
 
     avg_loss = total_loss / len(val_loader)
 
-    # APCER: spoof (label=1) misclassified as live (pred=0)
     spoof_mask = all_labels == 1
     apcer = (all_preds[spoof_mask] == 0).mean() if spoof_mask.any() else 0.0
 
-    # BPCER: live (label=0) misclassified as spoof (pred=1)
     live_mask = all_labels == 0
     bpcer = (all_preds[live_mask] == 1).mean() if live_mask.any() else 0.0
 
@@ -196,9 +144,36 @@ def evaluate(
     }
 
 
-# ────────────────────────────────────────────────────────────
-#  Checkpoint helpers  (rank-0 only)
-# ────────────────────────────────────────────────────────────
+def load_checkpoint(
+    path: str,
+    model: DDP,
+    optimizer: AdamW,
+    scheduler: LambdaLR,
+) -> tuple[int, float]:
+    start_epoch = 1
+    best_ace = float("inf")
+
+    if os.path.isfile(path):
+        if is_main():
+            print(f"=> Loading checkpoint '{path}'")
+        ckpt_dict = torch.load(path, map_location="cpu")
+        _unwrap(model).load_state_dict(ckpt_dict["model"])
+        if "optimizer" in ckpt_dict:
+            optimizer.load_state_dict(ckpt_dict["optimizer"])
+        if "scheduler" in ckpt_dict:
+            scheduler.load_state_dict(ckpt_dict["scheduler"])
+        if "epoch" in ckpt_dict:
+            start_epoch = ckpt_dict["epoch"] + 1
+        if "ace" in ckpt_dict:
+            best_ace = ckpt_dict["ace"]
+
+        if is_main():
+            print(f"=> Loaded checkpoint (epoch {ckpt_dict['epoch']})")
+    else:
+        if is_main():
+            print(f"=> No checkpoint found at '{path}'")
+
+    return start_epoch, best_ace
 
 
 def save_checkpoint(
@@ -207,7 +182,7 @@ def save_checkpoint(
     model: DDP,
     optimizer: AdamW,
     scheduler: LambdaLR,
-    best_ace: float,
+    ace: float,
     use_wandb: bool = True,
 ) -> None:
     torch.save(
@@ -216,29 +191,25 @@ def save_checkpoint(
             "model": _unwrap(model).state_dict(),
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
-            "best_ace": best_ace,
+            "ace": ace,
         },
         path,
     )
     tqdm.write(f"  [checkpoint] saved → {path}")
 
-    if use_wandb and wandb.run is not None:
+    if wandb.run is not None:
         artifact = wandb.Artifact(
-            name=f"pad-checkpoint-epoch{epoch:03d}",
+            name=f"checkpoint-epoch{epoch:03d}",
             type="checkpoint",
-            metadata={"epoch": epoch, "best_ace": best_ace},
+            metadata={"epoch": epoch, "ace": ace},
         )
         artifact.add_file(path)
         wandb.log_artifact(artifact)
+        tqdm.write("  [wandb] checkpoint artifact logged")
 
 
 def save_best(
-    ckpt_dir: str,
-    best_name: str,
-    epoch: int,
-    model: DDP,
-    metrics: dict,
-    use_wandb: bool = True,
+    ckpt_dir: str, best_name: str, epoch: int, model: DDP, metrics: dict
 ) -> None:
     path = os.path.join(ckpt_dir, best_name)
     torch.save(
@@ -249,11 +220,11 @@ def save_best(
         },
         path,
     )
-    tqdm.write(f"  [best model] ACE={metrics['val/ace']:.4f} → saved → {path}")
+    tqdm.write(f"  [best model] ACE={metrics['val/ace']:.4f} saved → {path}")
 
-    if use_wandb and wandb.run is not None:
+    if wandb.run is not None:
         artifact = wandb.Artifact(
-            name="pad-best-model",
+            name="best-model",
             type="model",
             metadata={"epoch": epoch, **metrics},
         )
@@ -261,11 +232,7 @@ def save_best(
         wandb.log_artifact(artifact)
         wandb.run.summary["best_val_ace"] = metrics["val/ace"]
         wandb.run.summary["best_val_ace_epoch"] = epoch
-
-
-# ────────────────────────────────────────────────────────────
-#  Training loop
-# ────────────────────────────────────────────────────────────
+        tqdm.write("  [wandb] best-model artifact logged")
 
 
 def train_one_epoch(
@@ -275,16 +242,13 @@ def train_one_epoch(
     train_sampler: DistributedSampler,
     optimizer: AdamW,
     scheduler: LambdaLR,
+    scaler: torch.amp.GradScaler,
     device: torch.device,
     epoch: int,
-    global_step: int,
-    lambda_mse: float = 1.0,
-    use_wandb: bool = True,
-) -> tuple[float, float, float, int]:
-    """
-    Returns (avg_total_loss, avg_ce_loss, avg_mse_loss, global_step).
-    """
+    lambda_mse: float,
+) -> tuple[float, float, float]:
     model.train()
+
     train_sampler.set_epoch(epoch)
 
     total_loss_sum = ce_loss_sum = mse_loss_sum = 0.0
@@ -304,7 +268,8 @@ def train_one_epoch(
         optimizer.zero_grad(set_to_none=True)
 
         # ── Student forward ──────────────────────────────────────────────────
-        student_emb, pad_outputs = model(images)
+        with torch.autocast(device_type="cuda"):
+            student_emb, pad_outputs = model(images)
 
         # ── PAD cross-entropy loss (all heads) ───────────────────────────────
         ce = pad_ce_loss(pad_outputs, labels)
@@ -314,18 +279,22 @@ def train_one_epoch(
             teacher_emb, _ = teacher(images)
 
         mse = recog_mse_loss(student_emb, teacher_emb)
-
         loss = ce + lambda_mse * mse
 
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
+        scaler.scale(loss).backward()
+
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(
+            model.parameters(),
+            max_norm=1.0,
+        )
+        scaler.step(optimizer)
+        scaler.update()
         scheduler.step()
 
         total_loss_sum += loss.item()
         ce_loss_sum += ce.item()
         mse_loss_sum += mse.item()
-        global_step += 1
 
         lr_val = scheduler.get_last_lr()[0]
         pbar.set_postfix(
@@ -335,30 +304,11 @@ def train_one_epoch(
             lr=f"{lr_val:.2e}",
         )
 
-        if use_wandb and is_main() and wandb.run is not None:
-            wandb.log(
-                {
-                    "train/loss_step": loss.item(),
-                    "train/ce_loss_step": ce.item(),
-                    "train/mse_loss_step": mse.item(),
-                    "train/lr": lr_val,
-                },
-                step=global_step,
-            )
-
     n = len(train_loader)
-    return total_loss_sum / n, ce_loss_sum / n, mse_loss_sum / n, global_step
+    return total_loss_sum / n, ce_loss_sum / n, mse_loss_sum / n
 
 
-# ────────────────────────────────────────────────────────────
-#  Main
-# ────────────────────────────────────────────────────────────
-
-
-def main(cfg: dict, use_wandb: bool = True) -> None:
-    local_rank, world_size = setup_ddp()
-    device = torch.device(f"cuda:{local_rank}")
-
+def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
     general_cfg = cfg["general"]
     data_cfg = cfg["data"]
     model_cfg = cfg["model"]
@@ -366,62 +316,36 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
     opt_cfg = cfg["optimizer"]
     sched_cfg = cfg["scheduler"]
     output_cfg = cfg["output"]
-    wandb_cfg = cfg.get("wandb", {})
+    wandb_cfg = cfg["wandb"]
+    loss_cfg = cfg["loss"]
+
+    # ── DDP init ────────────────────────────────────────────────────────────
+    local_rank, world_size = setup_ddp()
+    device = torch.device(f"cuda:{local_rank}")
 
     set_seed(general_cfg["seed"] + local_rank)
-
-    # ── wandb (rank-0 only) ──────────────────────────────────────────────────
-    if use_wandb and is_main():
-        api_key = wandb_cfg.get("api_key")
-        if not api_key or api_key == "your_wandb_api_key_here":
-            raise ValueError(
-                "wandb.api_key is not set. "
-                "Set it in the config or pass --no-wandb to skip."
-            )
-        wandb.login(key=api_key)
-        wandb.init(
-            project=wandb_cfg.get("project", "fingerprint-pad"),
-            tags=["pad"],
-            config=cfg,
-            save_code=True,
-        )
-        tqdm.write(f"[wandb] run: {wandb.run.url}")
 
     if is_main():
         print(f"Device: {device}  |  world_size: {world_size}")
 
-    ckpt_dir = output_cfg["checkpoint_dir"]
-    if is_main():
-        os.makedirs(ckpt_dir, exist_ok=True)
+    # ── Wandb ──────────────────────────────────────────────────
+    if is_main() and not no_wandb and wandb_cfg.get("api_key"):
+        wandb.login(key=wandb_cfg["api_key"])
+        wandb.init(
+            project=wandb_cfg.get("project", "ViTUnified-Recognition"), config=cfg
+        )
 
     # ── transforms ──────────────────────────────────────────────────────────
     train_transform, eval_transform = get_transforms("all")
 
-    # ── splits (rank-0 creates them if needed, others wait) ─────────────────
-    pad_json = data_cfg["pad_splits"]
-    if is_main() and not os.path.exists(pad_json):
-        if not os.path.exists(data_cfg["livdet_recog_splits"]):
-            create_LivDet_recog_splits(
-                data_root=data_cfg["data_root"],
-                output_path=data_cfg["livdet_recog_splits"],
-                seed=general_cfg["seed"]
-            )
-        create_LivDet_PAD_splits(
-            data_root=data_cfg["data_root"],
-            recog_json_path=data_cfg["livdet_recog_splits"],
-            output_path=pad_json,
-            seed=general_cfg["seed"]
-        )
-    dist.barrier()
-
     # ── datasets ─────────────────────────────────────────────────────────────
     train_dataset = PADDataset(
-        json_path=pad_json,
+        split_path=data_cfg["split_path"],
         split="train",
         transform=train_transform,
     )
     val_dataset = PADDataset(
-        json_path=pad_json,
+        split_path=data_cfg["split_path"],
         split="val",
         transform=eval_transform,
     )
@@ -453,17 +377,6 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
         pin_memory=training_cfg["pin_memory"],
     )
 
-    if use_wandb and is_main() and wandb.run is not None:
-        wandb.run.summary.update(
-            {
-                "dataset/train_samples": len(train_dataset),
-                "dataset/val_samples": len(val_dataset),
-                "training/world_size": world_size,
-                "training/per_gpu_batch": training_cfg["batch_size"],
-                "training/effective_batch": training_cfg["batch_size"] * world_size,
-            }
-        )
-
     # ── student model ────────────────────────────────────────────────────────
     model = ViTUnified(
         model_name=model_cfg["model_name"],
@@ -472,27 +385,12 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
         pad_dropout=model_cfg["pad_dropout"],
     ).to(device)
 
-    # Optionally warm-start the backbone from a recog checkpoint
-    recog_ckpt = output_cfg.get("recog_checkpoint")
-    if recog_ckpt and os.path.exists(recog_ckpt):
-        ckpt = torch.load(recog_ckpt, map_location=device)
-        missing, unexpected = model.load_state_dict(ckpt["model"], strict=False)
-        if is_main():
-            tqdm.write(
-                f"[student] warm-started from '{recog_ckpt}'  "
-                f"(missing={len(missing)}, unexpected={len(unexpected)})"
-            )
-
     model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
-    # ── teacher model (frozen recog backbone) ────────────────────────────────
-    teacher_ckpt = output_cfg["teacher_checkpoint"]
-    teacher = load_pretrained_recog(teacher_ckpt, model_cfg, device)
+    # ── teacher model ────────────────────────────────
+    teacher = load_pretrained_recog(model_cfg["recog_ckpt"], model_cfg, device)
 
-    if use_wandb and is_main() and wandb.run is not None:
-        wandb.watch(model, log="parameters", log_freq=100)
-
-    # ── optimizer & scheduler ────────────────────────────────────────────────
+    # ── optimizer & scheduler & scaler ────────────────────────────────────────────────
     optimizer = AdamW(
         model.parameters(),
         lr=opt_cfg["lr"],
@@ -507,50 +405,56 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
         power=sched_cfg["power"],
     )
 
-    lambda_mse = training_cfg.get("lambda_mse", 1.0)
+    lambda_mse = loss_cfg["lambda_mse"]
+
+    scaler = torch.amp.GradScaler("cuda")
 
     # ── training loop ────────────────────────────────────────────────────────
+    start_epoch = 1
     best_ace = float("inf")
-    ckpt_interval = training_cfg["checkpoint_interval"]
-    best_name = output_cfg["best_model_name"]
-    global_step = 0
+
+    if checkpoint is not None:
+        start_epoch, best_ace = load_checkpoint(checkpoint, model, optimizer, scheduler)
 
     if is_main():
+        if not wandb.run:
+            history = {"epoch": [], "train_loss": [], "val_eer": []}
+
+        os.makedirs(output_cfg["checkpoint_dir"], exist_ok=True)
+
         print("\n" + "=" * 60)
         print(
             f"Starting PAD training  (GPUs: {world_size}  |  "
             f"effective batch: {training_cfg['batch_size'] * world_size})"
         )
-        print(f"  lambda_mse = {lambda_mse}")
         print("=" * 60)
 
     epoch_pbar = tqdm(
-        range(1, training_cfg["epochs"] + 1),
+        range(start_epoch, training_cfg["epochs"] + 1),
         desc="Training",
         unit="epoch",
         disable=not is_main(),
     )
 
     for epoch in epoch_pbar:
-        avg_loss, avg_ce, avg_mse, global_step = train_one_epoch(
+        avg_loss, avg_ce, avg_mse = train_one_epoch(
             model,
             teacher,
             train_loader,
             train_sampler,
             optimizer,
             scheduler,
+            scaler,
             device,
             epoch,
-            global_step,
             lambda_mse=lambda_mse,
-            use_wandb=use_wandb,
         )
 
         dist.barrier()
 
-        metrics = evaluate(model, val_loader, device, epoch)
-
         if is_main():
+            metrics = evaluate(_unwrap(model), val_loader, device, epoch)
+
             epoch_pbar.set_postfix(
                 loss=f"{avg_loss:.4f}",
                 ace=f"{metrics['val/ace']:.4f}",
@@ -558,11 +462,11 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
             tqdm.write(
                 f"Epoch {epoch:03d} | "
                 f"loss: {avg_loss:.4f} (ce={avg_ce:.4f}, mse={avg_mse:.4f}) | "
-                f"val ACE: {metrics['val/ace']:.4f}  "
-                f"(APCER={metrics['val/apcer']:.4f}  BPCER={metrics['val/bpcer']:.4f})"
+                f"val ACE: {metrics['val/ace']:.4f} "
+                f"(APCER={metrics['val/apcer']:.4f}, BPCER={metrics['val/bpcer']:.4f})"
             )
 
-            if use_wandb and wandb.run is not None:
+            if wandb.run is not None:
                 wandb.log(
                     {
                         "train/loss_epoch": avg_loss,
@@ -570,20 +474,34 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
                         "train/mse_loss_epoch": avg_mse,
                         "epoch": epoch,
                         **metrics,
-                    },
-                    step=global_step,
+                    }
                 )
+            else:
+                history["epoch"].append(epoch)
+                history["train_loss"].append(avg_loss)
+                history["val_ace"].append(metrics["val/ace"])
 
             if metrics["val/ace"] < best_ace:
                 best_ace = metrics["val/ace"]
-                save_best(ckpt_dir, best_name, epoch, model, metrics, use_wandb)
+                save_best(
+                    output_cfg["checkpoint_dir"],
+                    output_cfg["best_model_name"],
+                    epoch,
+                    model,
+                    metrics,
+                )
 
-            if epoch % ckpt_interval == 0:
+            if epoch % training_cfg["checkpoint_interval"] == 0:
                 ckpt_path = os.path.join(
-                    ckpt_dir, f"pad_checkpoint_epoch{epoch:03d}.pth"
+                    output_cfg["checkpoint_dir"], f"checkpoint_epoch{epoch:03d}.pth"
                 )
                 save_checkpoint(
-                    ckpt_path, epoch, model, optimizer, scheduler, best_ace, use_wandb
+                    ckpt_path,
+                    epoch,
+                    model,
+                    optimizer,
+                    scheduler,
+                    metrics["val/ace"],
                 )
 
         dist.barrier()
@@ -593,13 +511,35 @@ def main(cfg: dict, use_wandb: bool = True) -> None:
         print(f"Training complete. Best val ACE: {best_ace:.4f}")
         print("=" * 60)
 
-        if use_wandb and wandb.run is not None:
+        if wandb.run is not None:
             wandb.finish()
+        else:
+            import matplotlib.pyplot as plt
+
+            fig, ax1 = plt.subplots(figsize=(10, 5))
+            ax2 = ax1.twinx()
+
+            ax1.plot(history["epoch"], history["train_loss"], "g-", label="Train Loss")
+            ax2.plot(history["epoch"], history["val_ace"], "b-", label="Val ACE")
+
+            ax1.set_xlabel("Epoch")
+            ax1.set_ylabel("Train Loss", color="g")
+            ax2.set_ylabel("Val ACE", color="b")
+
+            lines_1, labels_1 = ax1.get_legend_handles_labels()
+            lines_2, labels_2 = ax2.get_legend_handles_labels()
+            ax1.legend(lines_1 + lines_2, labels_1 + labels_2, loc="upper right")
+
+            plt.title("Training History")
+            plot_path = os.path.join(
+                output_cfg["checkpoint_dir"], "training_history.png"
+            )
+            plt.savefig(plot_path)
+            plt.close()
+            print(f"Saved training history plot to {plot_path}")
 
     cleanup_ddp()
 
-
-# ────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Fingerprint PAD Training")
@@ -614,7 +554,13 @@ if __name__ == "__main__":
         action="store_true",
         help="Disable Weights & Biases logging",
     )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help="Path to checkpoint to resume from",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    main(cfg, use_wandb=not args.no_wandb)
+    main(cfg, no_wandb=args.no_wandb, checkpoint=args.checkpoint)

@@ -160,7 +160,7 @@ def create_recog_splits(
     seed: int = 42,
 ) -> dict:
     def _filter_by_id(
-        subject_finger_paths: dict[str, dict[str, list[str]]], rng: random.Random
+        subject_finger_paths: dict[str, dict[str, list[str]]],
     ) -> dict[str, dict[str, list[str]]]:
         filtered_subject_finger_paths = {}
         removed_count = 0
@@ -204,11 +204,12 @@ def create_recog_splits(
             subject_finger_paths[subject][finger] = []
         subject_finger_paths[subject][finger].append(path)
 
-    rng = random.Random(seed)
     if min_samples is not None:
-        subject_finger_paths = _filter_by_id(subject_finger_paths, rng)
+        subject_finger_paths = _filter_by_id(subject_finger_paths)
 
     all_subjects = sorted(subject_finger_paths.keys())
+
+    rng = random.Random(seed)
     rng.shuffle(all_subjects)
 
     n_total = len(all_subjects)
@@ -278,7 +279,7 @@ def create_LivDet_splits(
     seed: int = 42,
 ) -> dict:
     def _filter_by_id(
-        subject_finger_paths: dict[str, dict[str, list[str]]], rng: random.Random
+        subject_finger_paths: dict[str, dict[str, list[str]]],
     ) -> dict[str, dict[str, list[str]]]:
         filtered_subject_finger_paths = {}
         removed_count = 0
@@ -286,7 +287,7 @@ def create_LivDet_splits(
         for subject, fingers in subject_finger_paths.items():
             valid_fingers = {}
             for finger, paths in fingers.items():
-                count = len(paths)
+                count = sum(1 for p in paths if "Live" in p)
                 if count >= min_samples:
                     valid_fingers[finger] = paths
                 else:
@@ -330,12 +331,13 @@ def create_LivDet_splits(
                 test_subject_finger_paths[subject][finger] = []
             test_subject_finger_paths[subject][finger].append(path)
 
-    rng = random.Random(seed)
     if min_samples is not None:
-        train_subject_finger_paths = _filter_by_id(train_subject_finger_paths, rng)
-        test_subject_finger_paths = _filter_by_id(test_subject_finger_paths, rng)
+        train_subject_finger_paths = _filter_by_id(train_subject_finger_paths)
+        test_subject_finger_paths = _filter_by_id(test_subject_finger_paths)
 
     all_train_subjects = sorted(train_subject_finger_paths.keys())
+
+    rng = random.Random(seed)
     rng.shuffle(all_train_subjects)
 
     n_total = len(all_train_subjects)
@@ -704,68 +706,108 @@ if __name__ == "__main__":
     # output_path = "data/FVC/fvc_splits.json"
     # create_recog_splits(data_root=data_root, output_path=output_path, split_ratio=[0.6, 0.2, 0.2])
 
-    data_roots = [
-        "CASIA-FSA",
-        "CASIA-FV5",
-        "FVC",
-        "Neurotechnology/CrossMatch",
-        "Neurotechnology/UareU",
-        "PolyU",
-        "SD301a",
-        "SD302",
-    ]
-    output_paths = [
-        "casiafsa",
-        "casiafv5",
-        "fvc",
-        "neurocm",
-        "neurouau",
-        "polyu",
-        "sd301a",
-        "sd302",
-    ]
-    for data_root, output_path in zip(data_roots, output_paths):
-        create_recog_splits(
-            data_root="data/" + data_root,
-            output_path=f"data/{data_root}/{output_path}_splits.json",
-            split_ratio=[0.7, 0.1, 0.2]
-        )
-        print()
+    # data_roots = [
+    #     "CASIA-FSA",
+    #     "CASIA-FV5",
+    #     "FVC",
+    #     "Neurotechnology/CrossMatch",
+    #     "Neurotechnology/UareU",
+    #     "PolyU",
+    #     "SD301a",
+    #     "SD302",
+    # ]
+    # output_paths = [
+    #     "casiafsa",
+    #     "casiafv5",
+    #     "fvc",
+    #     "neurocm",
+    #     "neurouau",
+    #     "polyu",
+    #     "sd301a",
+    #     "sd302",
+    # ]
+    # for data_root, output_path in zip(data_roots, output_paths):
+    #     create_recog_splits(
+    #         data_root="data/" + data_root,
+    #         output_path=f"data/{data_root}/{output_path}_splits.json",
+    #         split_ratio=[0.6, 0.2, 0.2]
+    #     )
+    #     print()
 
-    # data_root = "data/LivDet"
-    # create_LivDet_splits(data_root=data_root, val_ratio=0.1)
-    # pad_dataset = PADDataset(
-    #     split_path="data/LivDet/livdet_pad_splits.json",
-    #     split="train",
-    #     transform=transform,
+    # unify_recog_splits(
+    #     split_paths=[
+    #         "data/CASIA-FSA/casiafsa_splits.json",
+    #         "data/CASIA-FV5/casiafv5_splits.json",
+    #         "data/FVC/fvc_splits.json",
+    #         "data/Neurotechnology/CrossMatch/neurocm_splits.json",
+    #         "data/Neurotechnology/UareU/neurouau_splits.json",
+    #         "data/PolyU/polyu_splits.json",
+    #         "data/SD301a/sd301a_splits.json",
+    #         "data/SD302/sd302_splits.json",
+    #     ],
+    #     output_path="data/splits.json",
     # )
-    # print(pad_dataset)
-
-    unify_recog_splits(
-        split_paths=[
-            "data/CASIA-FSA/casiafsa_splits.json",
-            "data/CASIA-FV5/casiafv5_splits.json",
-            "data/FVC/fvc_splits.json",
-            "data/Neurotechnology/CrossMatch/neurocm_splits.json",
-            "data/Neurotechnology/UareU/neurouau_splits.json",
-            "data/PolyU/polyu_splits.json",
-            "data/SD301a/sd301a_splits.json",
-            "data/SD302/sd302_splits.json",
-        ],
-        output_path="data/splits.json",
-    )
-    print()
+    # print()
 
     # train_dataset = RecogTrainingDataset(
     #     split_path="data/splits.json", transform=transform
     # )
     # print(train_dataset)
 
-    val_dataset = RecogEvaluationDataset(
-        split_path="data/splits.json",
+    # val_dataset = RecogEvaluationDataset(
+    #     split_path="data/splits.json",
+    #     split="val",
+    #     n_genuine_impressions=32
+    # )
+    # print(val_dataset)
+    # print()
+
+    # unique_val_dataset = UniqueImageDataset(
+    #     idx_to_path=val_dataset.idx_to_path,
+    #     transform=transform,
+    # )
+    # print(f"Number of unique images in val: {len(unique_val_dataset)}")
+    # print()
+
+    # test_dataset = RecogEvaluationDataset(
+    #     split_path="data/splits.json",
+    #     split="test",
+    #     n_genuine_impressions=32
+    # )
+    # print(test_dataset)
+
+    data_root = "data/LivDet"
+    create_LivDet_splits(data_root=data_root, val_ratio=0.2)
+    print()
+
+    train_dataset = PADDataset(
+        split_path="data/LivDet/livdet_pad_splits.json",
+        split="train",
+        transform=transform,
+    )
+    print(train_dataset)
+    print()
+
+    val_dataset = PADDataset(
+        split_path="data/LivDet/livdet_pad_splits.json",
         split="val",
-        n_genuine_impressions=16,
-        impostor_mode="all",
+        transform=transform,
+    )
+    print(val_dataset)
+    print()
+
+    test_dataset = PADDataset(
+        split_path="data/LivDet/livdet_pad_splits.json",
+        split="test",
+        transform=transform,
+    )
+    print(test_dataset)
+    print()
+
+    val_dataset = RecogEvaluationDataset(
+        split_path="data/LivDet/livdet_recog_splits.json",
+        split="val",
+        n_genuine_impressions=32
     )
     print(val_dataset)
     print()
@@ -778,9 +820,8 @@ if __name__ == "__main__":
     print()
 
     test_dataset = RecogEvaluationDataset(
-        split_path="data/splits.json",
+        split_path="data/LivDet/livdet_recog_splits.json",
         split="test",
-        n_genuine_impressions=16,
-        impostor_mode="all",
+        n_genuine_impressions=32
     )
     print(test_dataset)
