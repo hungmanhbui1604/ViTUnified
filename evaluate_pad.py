@@ -8,13 +8,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torch.nn.functional as F
 import yaml
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from data import PADDataset
-from metrics import compute_recog_metrics
 from model import ViTUnified
 from transforms import get_transforms
 
@@ -172,7 +170,7 @@ def main(args: argparse.Namespace) -> None:
 
     # ── dataset ──────────────────────────────────────────────────────────────
     dataset = PADDataset(
-        split_path=data_cfg["split_path"],
+        split_path=args.split_path,
         split="test",
         transform=eval_transform,
     )
@@ -194,7 +192,7 @@ def main(args: argparse.Namespace) -> None:
     metrics = compute_pad_metrics(preds, labels)
 
     print("\n" + "=" * 50)
-    print(f"Split path: {data_cfg['split_path']}")
+    print(f"Split path: {args.split_path}")
     print("Split: 'test'")
     print(
         f"Samples: {metrics['n_total']:,} (live={metrics['n_live']:,}, spoof={metrics['n_spoof']:,})"
@@ -210,7 +208,7 @@ def main(args: argparse.Namespace) -> None:
     # ── save JSON ─────────────────────────────────────────────────────────────
     results = {
         "checkpoint": args.checkpoint_path,
-        "split_path": data_cfg["split_path"],
+        "split_path": args.split_path,
         "split": "test",
         "metrics": metrics,
     }

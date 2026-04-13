@@ -31,7 +31,7 @@ loss:
   lambda_mse: 1.0
 
 data:
-  split_path: "data/LivDet/livdet_pad_splits.json"
+  split_path: "data/pad_splits.json"
 
 output:
   checkpoint_dir: "ckpts/pad/"
