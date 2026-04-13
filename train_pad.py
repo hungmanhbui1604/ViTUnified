@@ -58,7 +58,7 @@ def load_pretrained_recog(
     model_cfg: dict,
     device: torch.device,
 ) -> ViTUnified:
-    teacher = ViTUnified(
+    model = ViTUnified(
         model_name=model_cfg["model_name"],
         pretrained=False,
         num_classes=model_cfg["num_classes"],
@@ -66,13 +66,12 @@ def load_pretrained_recog(
     ).to(device)
 
     ckpt = torch.load(ckpt_path, map_location=device)
-    teacher.load_state_dict(ckpt["model"])
+    model.load_state_dict(ckpt["model"])
 
-    teacher.eval()
     if is_main():
-        tqdm.write(f"[teacher] loaded from '{ckpt_path}'")
+        tqdm.write(f"[model] loaded from '{ckpt_path}'")
 
-    return teacher
+    return model
 
 
 def pad_ce_loss(pad_outputs: list[torch.Tensor], labels: torch.Tensor) -> torch.Tensor:
@@ -252,6 +251,7 @@ def train_one_epoch(
     lambda_mse: float,
 ) -> tuple[float, float, float]:
     model.train()
+    teacher.eval()
 
     train_sampler.set_epoch(epoch)
 
@@ -382,13 +382,7 @@ def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
     )
 
     # ── student model ────────────────────────────────────────────────────────
-    model = ViTUnified(
-        model_name=model_cfg["model_name"],
-        pretrained=model_cfg["pretrained"],
-        num_classes=model_cfg["num_classes"],
-        pad_dropout=model_cfg["pad_dropout"],
-    ).to(device)
-
+    model = load_pretrained_recog(model_cfg["recog_ckpt"], model_cfg, device)
     model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
     # ── teacher model ────────────────────────────────

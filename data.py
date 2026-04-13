@@ -530,6 +530,91 @@ def unify_recog_splits(split_paths: list, output_path: str = "data/splits.json")
     return unified
 
 
+def unify_pad_splits(
+    recog_split_paths: list[str],
+    pad_split_paths: list[str],
+    output_path: str = "data/pad_splits.json",
+):
+    print(f"Unifying PAD splits from {recog_split_paths} and {pad_split_paths}")
+
+    unified = {
+        "train": {},
+        "val": {},
+        "test": {},
+        "train_subjects": 0,
+        "val_subjects": 0,
+        "test_subjects": 0,
+        "train_fingers": 0,
+        "val_fingers": 0,
+        "test_fingers": 0,
+        "train_samples": 0,
+        "val_samples": 0,
+        "test_samples": 0,
+        "total_subjects": 0,
+        "total_fingers": 0,
+        "total_samples": 0,
+    }
+    
+    for split_path in recog_split_paths:
+        with open(split_path, "r") as f:
+            splits = json.load(f)
+
+        for split in ("train", "val", "test"):
+            transformed = {k: [[p, 0] for p in v] for k, v in splits[split].items()}
+            unified[split].update(transformed)
+
+        unified["train_subjects"] += splits["train_subjects"]
+        unified["val_subjects"] += splits["val_subjects"]
+        unified["test_subjects"] += splits["test_subjects"]
+        unified["train_fingers"] += splits["train_fingers"]
+        unified["val_fingers"] += splits["val_fingers"]
+        unified["test_fingers"] += splits["test_fingers"]
+        unified["train_samples"] += splits["train_samples"]
+        unified["val_samples"] += splits["val_samples"]
+        unified["test_samples"] += splits["test_samples"]
+
+    for split_path in pad_split_paths:
+        with open(split_path, "r") as f:
+            splits = json.load(f)
+
+        unified["train"].update(splits["train"])
+        unified["val"].update(splits["val"])
+        unified["test"].update(splits["test"])
+
+        unified["train_subjects"] += splits["train_subjects"]
+        unified["val_subjects"] += splits["val_subjects"]
+        unified["test_subjects"] += splits["test_subjects"]
+        unified["train_fingers"] += splits["train_fingers"]
+        unified["val_fingers"] += splits["val_fingers"]
+        unified["test_fingers"] += splits["test_fingers"]
+        unified["train_samples"] += splits["train_samples"]
+        unified["val_samples"] += splits["val_samples"]
+        unified["test_samples"] += splits["test_samples"]
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w") as f:
+        json.dump(unified, f, indent=2)
+
+    unified["total_subjects"] = (
+        unified["train_subjects"] + unified["val_subjects"] + unified["test_subjects"]
+    )
+    unified["total_fingers"] = (
+        unified["train_fingers"] + unified["val_fingers"] + unified["test_fingers"]
+    )
+    unified["total_samples"] = (
+        unified["train_samples"] + unified["val_samples"] + unified["test_samples"]
+    )
+
+    print(
+        f"• Train: {unified['train_samples']} samples ({unified['train_subjects']} subjects / {unified['train_fingers']} fingers)\n"
+        f"• Val: {unified['val_samples']} samples ({unified['val_subjects']} subjects / {unified['val_fingers']} fingers)\n"
+        f"• Test: {unified['test_samples']} samples ({unified['test_subjects']} subjects / {unified['test_fingers']} fingers)\n"
+        f"Total: {unified['total_samples']} samples ({unified['total_subjects']} subjects / {unified['total_fingers']} fingers)"
+    )
+
+    return unified
+
+
 class RecogTrainingDataset(Dataset):
     def __init__(
         self, split_path: str = "data/splits.json", transform: Optional[Callable] = None
@@ -706,124 +791,158 @@ if __name__ == "__main__":
     # output_path = "data/FVC/fvc_splits.json"
     # create_recog_splits(data_root=data_root, output_path=output_path, split_ratio=[0.6, 0.2, 0.2])
 
-    # data_roots = [
-    #     "CASIA-FSA",
-    #     "CASIA-FV5",
-    #     "FVC",
-    #     "Neurotechnology/CrossMatch",
-    #     "Neurotechnology/UareU",
-    #     "PolyU",
-    #     "SD301a",
-    #     "SD302",
-    # ]
-    # output_paths = [
-    #     "casiafsa",
-    #     "casiafv5",
-    #     "fvc",
-    #     "neurocm",
-    #     "neurouau",
-    #     "polyu",
-    #     "sd301a",
-    #     "sd302",
-    # ]
-    # for data_root, output_path in zip(data_roots, output_paths):
-    #     create_recog_splits(
-    #         data_root="data/" + data_root,
-    #         output_path=f"data/{data_root}/{output_path}_splits.json",
-    #         split_ratio=[0.6, 0.2, 0.2]
-    #     )
-    #     print()
+    data_roots = [
+        "CASIA-FSA",
+        "CASIA-FV5",
+        "FVC",
+        "Neurotechnology/CrossMatch",
+        "Neurotechnology/UareU",
+        "PolyU",
+        "SD301a",
+        "SD302",
+    ]
+    output_paths = [
+        "casiafsa",
+        "casiafv5",
+        "fvc",
+        "neurocm",
+        "neurouau",
+        "polyu",
+        "sd301a",
+        "sd302",
+    ]
+    for data_root, output_path in zip(data_roots, output_paths):
+        create_recog_splits(
+            data_root="data/" + data_root,
+            output_path=f"data/{data_root}/{output_path}_splits.json",
+            split_ratio=[0.6, 0.2, 0.2]
+        )
+        print()
 
-    # unify_recog_splits(
-    #     split_paths=[
-    #         "data/CASIA-FSA/casiafsa_splits.json",
-    #         "data/CASIA-FV5/casiafv5_splits.json",
-    #         "data/FVC/fvc_splits.json",
-    #         "data/Neurotechnology/CrossMatch/neurocm_splits.json",
-    #         "data/Neurotechnology/UareU/neurouau_splits.json",
-    #         "data/PolyU/polyu_splits.json",
-    #         "data/SD301a/sd301a_splits.json",
-    #         "data/SD302/sd302_splits.json",
-    #     ],
-    #     output_path="data/splits.json",
-    # )
-    # print()
+    unify_recog_splits(
+        split_paths=[
+            "data/CASIA-FSA/casiafsa_splits.json",
+            "data/CASIA-FV5/casiafv5_splits.json",
+            "data/FVC/fvc_splits.json",
+            "data/Neurotechnology/CrossMatch/neurocm_splits.json",
+            "data/Neurotechnology/UareU/neurouau_splits.json",
+            "data/PolyU/polyu_splits.json",
+            "data/SD301a/sd301a_splits.json",
+            "data/SD302/sd302_splits.json",
+        ],
+        output_path="data/splits.json",
+    )
+    print()
 
-    # train_dataset = RecogTrainingDataset(
-    #     split_path="data/splits.json", transform=transform
-    # )
-    # print(train_dataset)
-    # print()
+    train_dataset = RecogTrainingDataset(
+        split_path="data/splits.json", transform=transform
+    )
+    print(train_dataset)
+    print()
 
-    # val_dataset = RecogEvaluationDataset(
-    #     split_path="data/splits.json",
-    #     split="val",
-    #     n_genuine_impressions=32
-    # )
-    # print(val_dataset)
-    # print()
+    val_dataset = RecogEvaluationDataset(
+        split_path="data/splits.json",
+        split="val",
+        n_genuine_impressions=32
+    )
+    print(val_dataset)
+    print()
 
-    # unique_val_dataset = UniqueImageDataset(
-    #     idx_to_path=val_dataset.idx_to_path,
-    #     transform=transform,
-    # )
-    # print(f"Number of unique images in val: {len(unique_val_dataset)}")
-    # print()
+    unique_val_dataset = UniqueImageDataset(
+        idx_to_path=val_dataset.idx_to_path,
+        transform=transform,
+    )
+    print(f"Number of unique images in val: {len(unique_val_dataset)}")
+    print()
 
-    # test_dataset = RecogEvaluationDataset(
-    #     split_path="data/splits.json",
-    #     split="test",
-    #     n_genuine_impressions=32
-    # )
-    # print(test_dataset)
-    # print()
+    test_dataset = RecogEvaluationDataset(
+        split_path="data/splits.json",
+        split="test",
+        n_genuine_impressions=32
+    )
+    print(test_dataset)
+    print()
 
-    data_root = "data/LivDet/LivDet2015/CrossMatch"
+    data_root = "data/LivDet/"
     create_LivDet_splits(data_root=data_root, val_ratio=0.2, min_samples=2)
-    # print()
+    print()
 
-    # train_dataset = PADDataset(
-    #     split_path="data/LivDet/livdet_pad_splits.json",
-    #     split="train",
-    #     transform=transform,
-    # )
-    # print(train_dataset)
-    # print()
+    unify_pad_splits(
+        recog_split_paths=[
+            "data/CASIA-FSA/casiafsa_splits.json",
+            "data/CASIA-FV5/casiafv5_splits.json",
+            "data/FVC/fvc_splits.json",
+            "data/Neurotechnology/CrossMatch/neurocm_splits.json",
+            "data/Neurotechnology/UareU/neurouau_splits.json",
+            "data/PolyU/polyu_splits.json",
+            "data/SD301a/sd301a_splits.json",
+            "data/SD302/sd302_splits.json",
+        ],
+        pad_split_paths=[
+            "data/LivDet/livdet_pad_splits.json",
+        ],
+        output_path="data/pad_splits.json",
+    )
+    print()
 
-    # val_dataset = PADDataset(
-    #     split_path="data/LivDet/livdet_pad_splits.json",
-    #     split="val",
-    #     transform=transform,
-    # )
-    # print(val_dataset)
-    # print()
+    unify_recog_splits(
+        split_paths=[
+            "data/CASIA-FSA/casiafsa_splits.json",
+            "data/CASIA-FV5/casiafv5_splits.json",
+            "data/FVC/fvc_splits.json",
+            "data/Neurotechnology/CrossMatch/neurocm_splits.json",
+            "data/Neurotechnology/UareU/neurouau_splits.json",
+            "data/PolyU/polyu_splits.json",
+            "data/SD301a/sd301a_splits.json",
+            "data/SD302/sd302_splits.json",
+            "data/LivDet/livdet_recog_splits.json",
+        ],
+        output_path="data/recog_splits.json",
+    )
+    print()
 
-    # test_dataset = PADDataset(
-    #     split_path="data/LivDet/livdet_pad_splits.json",
-    #     split="test",
-    #     transform=transform,
-    # )
-    # print(test_dataset)
-    # print()
+    train_dataset = PADDataset(
+        split_path="data/pad_splits.json",
+        split="train",
+        transform=transform,
+    )
+    print(train_dataset)
+    print()
 
-    # val_dataset = RecogEvaluationDataset(
-    #     split_path="data/LivDet/livdet_recog_splits.json",
-    #     split="val",
-    #     n_genuine_impressions=32
-    # )
-    # print(val_dataset)
-    # print()
+    val_dataset = PADDataset(
+        split_path="data/pad_splits.json",
+        split="val",
+        transform=transform,
+    )
+    print(val_dataset)
+    print()
 
-    # unique_val_dataset = UniqueImageDataset(
-    #     idx_to_path=val_dataset.idx_to_path,
-    #     transform=transform,
-    # )
-    # print(f"Number of unique images in val: {len(unique_val_dataset)}")
-    # print()
+    test_dataset = PADDataset(
+        split_path="data/pad_splits.json",
+        split="test",
+        transform=transform,
+    )
+    print(test_dataset)
+    print()
 
-    # test_dataset = RecogEvaluationDataset(
-    #     split_path="data/LivDet/livdet_recog_splits.json",
-    #     split="test",
-    #     n_genuine_impressions=32
-    # )
-    # print(test_dataset)
+    val_dataset = RecogEvaluationDataset(
+        split_path="data/recog_splits.json",
+        split="val",
+        n_genuine_impressions=32
+    )
+    print(val_dataset)
+    print()
+
+    unique_val_dataset = UniqueImageDataset(
+        idx_to_path=val_dataset.idx_to_path,
+        transform=transform,
+    )
+    print(f"Number of unique images in val: {len(unique_val_dataset)}")
+    print()
+
+    test_dataset = RecogEvaluationDataset(
+        split_path="data/recog_splits.json",
+        split="test",
+        n_genuine_impressions=32
+    )
+    print(test_dataset)

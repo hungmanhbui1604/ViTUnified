@@ -50,4 +50,3 @@ evaluation:
   n_impostor_impressions: 1
   impostor_mode: "all"
   n_impostor_subset: None
-  checkpoint_path: "ckpts/recog/best_model.pth"

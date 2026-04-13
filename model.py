@@ -80,3 +80,9 @@ class ViTUnified(nn.Module):
             param.requires_grad = False
         
         self.pad_heads.eval()
+
+    def _freeze_backbone(self):
+        for param in self.backbone.parameters():
+            param.requires_grad = False
+            
+        self.backbone.eval()

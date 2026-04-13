@@ -165,7 +165,7 @@ def main(args: argparse.Namespace) -> None:
     os.makedirs(args.output_dir, exist_ok=True)
 
     # ── model ────────────────────────────────────────────────────────────────
-    model = load_model(evaluation_cfg["checkpoint_path"], model_cfg, device)
+    model = load_model(args.checkpoint_path, model_cfg, device)
 
     # ── transforms ───────────────────────────────────────────────────────────
     _, eval_transform = get_transforms("all")
@@ -209,7 +209,7 @@ def main(args: argparse.Namespace) -> None:
 
     # ── save JSON ─────────────────────────────────────────────────────────────
     results = {
-        "checkpoint": evaluation_cfg["checkpoint_path"],
+        "checkpoint": args.checkpoint_path,
         "split_path": data_cfg["split_path"],
         "split": "test",
         "metrics": metrics,
@@ -246,6 +246,11 @@ if __name__ == "__main__":
         "--output-dir",
         default="results/pad/",
         help="Directory for metrics JSON and plot PNGs",
+    )
+    parser.add_argument(
+        "--checkpoint-path",
+        required=True,
+        help="Path to the checkpoint",
     )
 
     main(parser.parse_args())
