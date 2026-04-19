@@ -24,10 +24,10 @@ def load_config(path: str) -> dict:
 
 def load_model(ckpt_path: str, model_cfg: dict, device: torch.device) -> ViTUnified:
     model = ViTUnified(
-        model_name=model_cfg["model_name"],
+        model_name=model_cfg.get("model_name", "vit_small_patch16_224"),
         pretrained=False,
-        num_classes=model_cfg["num_classes"],
-        pad_dropout=model_cfg["pad_dropout"],
+        num_classes=model_cfg.get("num_classes", 2),
+        pad_dropout=model_cfg.get("pad_dropout", 0.0),
     ).to(device)
 
     ckpt = torch.load(ckpt_path, map_location=device)
@@ -155,7 +155,7 @@ def main(args: argparse.Namespace) -> None:
     cfg = load_config(args.config)
     model_cfg = cfg["model"]
     evaluation_cfg = cfg["evaluation"]
-    data_cfg = cfg["data"]
+    training_cfg = cfg["training"]
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\nDevice: {device}")
@@ -179,10 +179,10 @@ def main(args: argparse.Namespace) -> None:
 
     loader = DataLoader(
         dataset,
-        batch_size=evaluation_cfg["batch_size"],
+        batch_size=evaluation_cfg["pad_batch_size"],
         shuffle=False,
-        num_workers=evaluation_cfg["num_workers"],
-        pin_memory=evaluation_cfg["pin_memory"],
+        num_workers=training_cfg["num_workers"],
+        pin_memory=training_cfg["pin_memory"],
     )
 
     # ── inference ────────────────────────────────────────────────────────────
@@ -232,7 +232,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--config",
-        default="config_pad.yaml",
+        default="joint_config.yaml",
         help="Path to the PAD YAML config",
     )
     parser.add_argument(

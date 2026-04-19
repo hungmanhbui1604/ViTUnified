@@ -32,29 +32,19 @@ class ArcFaceLoss(nn.Module):
 
         # cosine similarity
         cosine = F.linear(embs, weight)
-
-        # Slightly tighter clamp for fp16/Mixed Precision safety
         cosine = cosine.clamp(-1.0 + 1e-7, 1.0 - 1e-7)
 
-        # Compute margin only for the ground-truth classes
+        # compute margin only for the ground-truth classes
         idx = torch.arange(embs.size(0), device=embs.device)
-
-        # Extract just the target logits
         target_cosine = cosine[idx, labels]
-
-        # Compute sin_theta and phi ONLY for the targets
         sin_theta = torch.sqrt(1.0 - target_cosine**2)
         phi = target_cosine * self.cos_m - sin_theta * self.sin_m
-
-        # Apply margin condition
         phi = torch.where(target_cosine > self.th, phi, target_cosine - self.mm)
 
-        # Clone cosine to avoid in-place gradient errors, then update target indices
+        # update logits and compute loss
         logits = cosine.clone()
         phi = phi.to(logits.dtype)
         logits[idx, labels] = phi
-
-        # Scale and compute loss
         logits *= self.scale
         loss = F.cross_entropy(logits, labels)
 

@@ -9,7 +9,6 @@ def polynomial_scheduler(
     power: float,
 ) -> LambdaLR:
     """lr(t) = (base_lr - lr_min) * (1 - t / total_steps) ** power + lr_min"""
-
     def _lr_lambda(t: int) -> float:
         if t >= total_iters:
             return lr_min / base_lr

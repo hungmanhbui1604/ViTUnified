@@ -5,9 +5,9 @@ import random
 from itertools import combinations
 from typing import Callable, Optional
 
+import torchvision.transforms as transforms
 from PIL import Image
 from torch.utils.data import Dataset
-from torchvision import transforms
 
 
 def _extract_id(path: str, id_type: str = "subject") -> str:
@@ -18,9 +18,10 @@ def _extract_id(path: str, id_type: str = "subject") -> str:
     norm = path.replace("\\", "/")
 
     if "CASIA-FSA" in norm:
-        filename = os.path.basename(norm)  # RRRR_IIIIF_XXXX_Z_S.bmp
+        # RRRR_IIIIF_XXXX_Z_S.bmp
+        filename = os.path.basename(norm)
         parts = filename.split("_")
-        assert len(parts) == 5, f"Unexpected filename format: {filename}"
+        assert len(parts) == 5, f"Unexpected CASIA-FSA filename format: {filename}"
 
         iiiif = parts[1]  # IIIIF
         subject_id = iiiif[:-1]  # IIII
@@ -29,105 +30,37 @@ def _extract_id(path: str, id_type: str = "subject") -> str:
         dst = "casiafsa"
 
     elif "CASIA-FV5" in norm:
-        filename = os.path.basename(norm)  # subject_finger_impression.bmp
+        # subject_finger_impression.bmp
+        filename = os.path.basename(norm)
         parts = filename.split("_")
-        assert len(parts) == 3, f"Unexpected filename format: {filename}"
+        assert len(parts) == 3, f"Unexpected CASIA-FV5 filename format: {filename}"
 
         subject_id = parts[0]
         finger_id = parts[1]
 
         dst = "casiafv5"
 
-    elif "Neurotechnology" in norm and "CrossMatch" in norm:
-        filename = os.path.basename(norm)  # subject_finger_impression.bmp
-        parts = filename.split("_")
-        assert len(parts) == 3, f"Unexpected filename format: {filename}"
-
-        subject_id = parts[0]
-        finger_id = parts[1]
-
-        dst = "neurocm"
-
-    elif "Neurotechnology" in norm and "UareU" in norm:
-        filename = os.path.basename(norm)  # subject_finger_impression.bmp
-        parts = filename.split("_")
-        assert len(parts) == 3, f"Unexpected filename format: {filename}"
-
-        subject_id = parts[0]
-        finger_id = parts[1]
-
-        dst = "neurouau"
-
-    elif "SD301a" in norm:
-        filename = os.path.basename(
-            norm
-        )  # SUBJECT_ENCOUNTER_DEVICE_RESOLUTION_CAPTURE_FRGP.EXT
-        parts = filename.split("_")
-        assert len(parts) == 6, f"Unexpected filename format: {filename}"
-
-        subject_id = parts[0]
-        finger_id = parts[-1].split(".")[0]
-
-        dst = "sd301a"
-
     elif "FVC" in norm:
-        # data/FVC/FVC2000/Dbs/Db1_a/1_1.tif
+        # data/FVC/FVC2000/Db1/1_1.tif
         path_parts = norm.split("/")
-        assert len(path_parts) == 6, f"Unexpected path format: {norm}"
 
-        year = path_parts[-4]
+        year = path_parts[-3]
         db = path_parts[-2]
+        filename = path_parts[-1]
 
-        filename = os.path.basename(norm)
         parts = filename.split("_")
-        assert len(parts) == 2, f"Unexpected filename format: {filename}"
+        assert len(parts) == 2, f"Unexpected FVC filename format: {filename}"
 
         finger_id = parts[0]
         subject_id = finger_id
 
         dst = f"{year}_{db}"
 
-    elif "SD302" in norm:
-        """
-        SUBJECT_DEVICE_CAPTURE_FRGP.EXT
-        SUBJECT_DEVICE_RESOLUTION_CAPTURE_FRGP.EXT
-        """
-        filename = os.path.basename(norm)
-        parts = filename.split("_")
-        assert 4 <= len(parts) <= 5, f"Unexpected filename format: {filename}"
-
-        subject_id = parts[0]
-        finger_id = parts[-1].split(".")[0]
-
-        dst = "sd302"
-
-    elif "PolyU" in norm:
-        """
-        data/PolyU/contact-based_fingerprints/first_session/1_1.jpg
-        data/PolyU/contactless_2d_fingerprint_images/first_session/p1/p1.bmp
-        """
-        path_parts = norm.split("/")
-        assert 5 <= len(path_parts) <= 6, f"Unexpected path format: {norm}"
-
-        if len(path_parts) == 5:
-            filename = os.path.basename(norm)  # X_Y.jpg
-            parts = filename.split("_")
-            assert len(parts) == 2, f"Unexpected filename format: {filename}"
-
-            finger_id = parts[0]
-            subject_id = finger_id
-        else:
-            pX = path_parts[-2]
-
-            finger_id = pX[1:]
-            subject_id = finger_id
-
-        dst = "polyu"
-
     elif "LivDet" in norm:
         """
         data/LivDet/LivDet2011/Biometrika/Train/Live/1_1.png
         data/LivDet/LivDet2013/Biometrika/Train/Live/031_Lidx_1.png
+        data/LivDet/LivDet2009/CrossMatch/Train/Live/0056195_R1_3/0056195_R1_1.png
         """
         path_parts = norm.split("/")
         livdet_idx = path_parts.index("LivDet")
@@ -136,15 +69,88 @@ def _extract_id(path: str, id_type: str = "subject") -> str:
 
         filename = os.path.basename(norm)
         parts = filename.split("_")
+        assert 3 >= len(parts) >= 2, f"Unexpected LivDet filename format: {filename}"
 
         if len(parts) == 3:  # subjectid_finger_impression
             subject_id, finger_id, _ = parts
-
         else:  # id_impression
             finger_id, _ = parts
             subject_id = finger_id
 
         dst = f"{year}_{sensor}"
+
+    elif "Neurotechnology-CrossMatch" in norm:
+        # subject_finger_impression.bmp
+        filename = os.path.basename(norm)
+        parts = filename.split("_")
+        assert len(parts) == 3, (
+            f"Unexpected Neurotechnology-CrossMatch filename format: {filename}"
+        )
+
+        subject_id = parts[0]
+        finger_id = parts[1]
+
+        dst = "neurocm"
+
+    elif "Neurotechnology-UareU" in norm:
+        # subject_finger_impression.bmp
+        filename = os.path.basename(norm)
+        parts = filename.split("_")
+        assert len(parts) == 3, (
+            f"Unexpected Neurotechnology-UareU filename format: {filename}"
+        )
+
+        subject_id = parts[0]
+        finger_id = parts[1]
+
+        dst = "neurouau"
+
+    elif "PolyU" in norm:
+        # X_Y.jpg
+        filename = os.path.basename(norm)
+        parts = filename.split("_")
+        assert len(parts) == 2, f"Unexpected PolyU filename format: {filename}"
+
+        finger_id = parts[0]
+        subject_id = finger_id
+
+        dst = "polyu"
+
+    elif "SD301a" in norm:
+        # SUBJECT_ENCOUNTER_DEVICE_RESOLUTION_CAPTURE_FRGP.EXT
+        filename = os.path.basename(norm)
+        parts = filename.split("_")
+        assert len(parts) == 6, f"Unexpected SD301a filename format: {filename}"
+
+        subject_id = parts[0]
+        finger_id = parts[-1].split(".")[0]
+
+        dst = "sd301a"
+
+    elif "SD302" in norm:
+        """
+        SUBJECT_DEVICE_CAPTURE_FRGP.EXT
+        SUBJECT_DEVICE_RESOLUTION_CAPTURE_FRGP.EXT
+        """
+        filename = os.path.basename(norm)
+        parts = filename.split("_")
+        assert 4 <= len(parts) <= 5, f"Unexpected SD302 filename format: {filename}"
+
+        subject_id = parts[0]
+        finger_id = parts[-1].split(".")[0]
+
+        dst = "sd302"
+
+    elif "ATVS-FF" in norm:
+        # 03_li_1.bmp
+        filename = os.path.basename(norm)
+        parts = filename.split("_")
+        assert len(parts) == 3, f"Unexpected ATVS-FF filename format: {filename}"
+
+        subject_id = parts[0]
+        finger_id = parts[1]
+
+        dst = "atvsff"
 
     if id_type == "subject":
         return f"{dst}_{subject_id}"
@@ -155,7 +161,7 @@ def _extract_id(path: str, id_type: str = "subject") -> str:
 def create_recog_splits(
     data_root: str,
     output_path: str,
-    split_ratio: tuple = (0.8, 0.05, 0.15),
+    split_ratio: tuple = (0.6, 0.2, 0.2),
     min_samples: Optional[int] = 3,
     seed: int = 42,
 ) -> dict:
@@ -272,12 +278,216 @@ def create_recog_splits(
     return splits
 
 
+def create_pad_splits(
+    data_root: str,
+    recog_output_path: str,
+    pad_output_path: str,
+    split_ratio: tuple = (0.6, 0.2, 0.2),
+    min_samples: Optional[int] = 3,
+    seed: int = 42,
+) -> tuple[dict, dict]:
+    def _filter_by_id(
+        subject_finger_paths: dict[str, dict[str, list[str]]],
+    ) -> dict[str, dict[str, list[str]]]:
+        filtered_subject_finger_paths = {}
+        removed_count = 0
+
+        for subject, fingers in subject_finger_paths.items():
+            valid_fingers = {}
+            for finger, paths in fingers.items():
+                count = sum(1 for p in paths if "Live" in p)
+                if count >= min_samples:
+                    valid_fingers[finger] = paths
+                else:
+                    removed_count += 1
+
+            if valid_fingers:
+                filtered_subject_finger_paths[subject] = valid_fingers
+
+        print(f"Removed {removed_count} fingers that did not meet the criteria.")
+        return filtered_subject_finger_paths
+
+    assert len(split_ratio) == 3, "split_ratio must have 3 values (train, val, test)"
+    assert all(r >= 0 for r in split_ratio), "split_ratio must be non-negative"
+    assert abs(sum(split_ratio) - 1.0) < 1e-6, "split_ratio must sum to 1"
+    assert min_samples >= 2, "min_samples must be at least 2"
+
+    print(f"Creating splits for {data_root}")
+
+    exts = ("*.bmp", "*.tif", "*.png", "*.jpg")
+    all_paths = [
+        p
+        for ext in exts
+        for p in glob.glob(os.path.join(data_root, "**", ext), recursive=True)
+    ]
+
+    subject_finger_paths = {}
+    for path in all_paths:
+        subject = _extract_id(path, "subject")
+        finger = _extract_id(path, "finger")
+        if subject not in subject_finger_paths:
+            subject_finger_paths[subject] = {}
+        if finger not in subject_finger_paths[subject]:
+            subject_finger_paths[subject][finger] = []
+        subject_finger_paths[subject][finger].append(path)
+
+    if min_samples is not None:
+        recog_subject_finger_paths = _filter_by_id(subject_finger_paths)
+
+    all_subjects = sorted(subject_finger_paths.keys())
+
+    rng = random.Random(seed)
+    rng.shuffle(all_subjects)
+
+    n_total = len(all_subjects)
+    n_train = int(n_total * split_ratio[0])
+    n_val = int(n_total * split_ratio[1])
+
+    train_subjects = set(all_subjects[:n_train])
+    val_subjects = set(all_subjects[n_train : n_train + n_val])
+
+    recog_splits = {
+        "train": {},
+        "val": {},
+        "test": {},
+        "train_samples": 0,
+        "val_samples": 0,
+        "test_samples": 0,
+    }
+
+    pad_splits = {
+        "train": {},
+        "val": {},
+        "test": {},
+        "train_samples": 0,
+        "val_samples": 0,
+        "test_samples": 0,
+    }
+
+    for subject, fingers in subject_finger_paths.items():
+        target = (
+            "train"
+            if subject in train_subjects
+            else "val"
+            if subject in val_subjects
+            else "test"
+        )
+        for finger, paths in fingers.items():
+            for path in paths:
+                if "Live" in path:
+                    if finger not in pad_splits[target]:
+                        pad_splits[target][finger] = []
+                    pad_splits[target][finger].append((path, 0))
+                    pad_splits[f"{target}_samples"] += 1
+                else:
+                    if finger not in pad_splits[target]:
+                        pad_splits[target][finger] = []
+                    pad_splits[target][finger].append((path, 1))
+                    pad_splits[f"{target}_samples"] += 1
+
+    for subject, fingers in recog_subject_finger_paths.items():
+        target = (
+            "train"
+            if subject in train_subjects
+            else "val"
+            if subject in val_subjects
+            else "test"
+        )
+        for finger, paths in fingers.items():
+            for path in paths:
+                if "Live" in path:
+                    if finger not in recog_splits[target]:
+                        recog_splits[target][finger] = []
+                    recog_splits[target][finger].append(path)
+                    recog_splits[f"{target}_samples"] += 1
+
+    recog_train_subjects_cnt = len(
+        set(s for s in recog_subject_finger_paths.keys() if s in train_subjects)
+    )
+    recog_val_subjects_cnt = len(
+        set(s for s in recog_subject_finger_paths.keys() if s in val_subjects)
+    )
+    recog_test_subjects_cnt = len(
+        set(
+            s
+            for s in recog_subject_finger_paths.keys()
+            if s not in train_subjects and s not in val_subjects
+        )
+    )
+
+    recog_splits.update(
+        {
+            "train_subjects": recog_train_subjects_cnt,
+            "val_subjects": recog_val_subjects_cnt,
+            "test_subjects": recog_test_subjects_cnt,
+            "train_fingers": len(recog_splits["train"]),
+            "val_fingers": len(recog_splits["val"]),
+            "test_fingers": len(recog_splits["test"]),
+            "total_subjects": recog_train_subjects_cnt
+            + recog_val_subjects_cnt
+            + recog_test_subjects_cnt,
+            "total_fingers": len(recog_splits["train"])
+            + len(recog_splits["val"])
+            + len(recog_splits["test"]),
+            "total_samples": recog_splits["train_samples"]
+            + recog_splits["val_samples"]
+            + recog_splits["test_samples"],
+        }
+    )
+
+    pad_splits.update(
+        {
+            "train_subjects": n_train,
+            "val_subjects": n_val,
+            "test_subjects": n_total - n_train - n_val,
+            "train_fingers": len(pad_splits["train"]),
+            "val_fingers": len(pad_splits["val"]),
+            "test_fingers": len(pad_splits["test"]),
+            "total_subjects": n_total,
+            "total_fingers": len(pad_splits["train"])
+            + len(pad_splits["val"])
+            + len(pad_splits["test"]),
+            "total_samples": pad_splits["train_samples"]
+            + pad_splits["val_samples"]
+            + pad_splits["test_samples"],
+        }
+    )
+
+    print(
+        "Recog:\n"
+        f"• Train: {recog_splits['train_samples']} samples ({recog_splits['train_subjects']} subjects / {recog_splits['train_fingers']} fingers)\n"
+        f"• Val: {recog_splits['val_samples']} samples ({recog_splits['val_subjects']} subjects / {recog_splits['val_fingers']} fingers)\n"
+        f"• Test: {recog_splits['test_samples']} samples ({recog_splits['test_subjects']} subjects / {recog_splits['test_fingers']} fingers)\n"
+        f"Total: {recog_splits['total_samples']} samples ({recog_splits['total_subjects']} subjects / {recog_splits['total_fingers']} fingers)",
+    )
+
+    print(
+        "PAD:\n"
+        f"• Train: {pad_splits['train_samples']} samples ({pad_splits['train_subjects']} subjects / {pad_splits['train_fingers']} fingers)\n"
+        f"• Val: {pad_splits['val_samples']} samples ({pad_splits['val_subjects']} subjects / {pad_splits['val_fingers']} fingers)\n"
+        f"• Test: {pad_splits['test_samples']} samples ({pad_splits['test_subjects']} subjects / {pad_splits['test_fingers']} fingers)\n"
+        f"Total: {pad_splits['total_samples']} samples ({pad_splits['total_subjects']} subjects / {pad_splits['total_fingers']} fingers)",
+    )
+
+    os.makedirs(os.path.dirname(recog_output_path), exist_ok=True)
+    with open(recog_output_path, "w") as f:
+        json.dump(recog_splits, f, indent=2)
+
+    os.makedirs(os.path.dirname(pad_output_path), exist_ok=True)
+    with open(pad_output_path, "w") as f:
+        json.dump(pad_splits, f, indent=2)
+
+    return recog_splits, pad_splits
+
+
 def create_LivDet_splits(
-    data_root: str = "data/LivDet/",
+    data_root: str = "data/LivDet",
+    recog_output_path: str = "data/LivDet/recog_splits.json",
+    pad_output_path: str = "data/LivDet/pad_splits.json",
     val_ratio: float = 0.2,
     min_samples: int = 3,
     seed: int = 42,
-) -> dict:
+) -> tuple[dict, dict]:
     def _filter_by_id(
         subject_finger_paths: dict[str, dict[str, list[str]]],
     ) -> dict[str, dict[str, list[str]]]:
@@ -332,8 +542,8 @@ def create_LivDet_splits(
             test_subject_finger_paths[subject][finger].append(path)
 
     if min_samples is not None:
-        train_subject_finger_paths = _filter_by_id(train_subject_finger_paths)
-        test_subject_finger_paths = _filter_by_id(test_subject_finger_paths)
+        recog_train_subject_finger_paths = _filter_by_id(train_subject_finger_paths)
+        recog_test_subject_finger_paths = _filter_by_id(test_subject_finger_paths)
 
     all_train_subjects = sorted(train_subject_finger_paths.keys())
 
@@ -368,11 +578,6 @@ def create_LivDet_splits(
         for finger, paths in fingers.items():
             for path in paths:
                 if "Live" in path:
-                    if finger not in recog_splits[target]:
-                        recog_splits[target][finger] = []
-                    recog_splits[target][finger].append(path)
-                    recog_splits[f"{target}_samples"] += 1
-
                     if finger not in pad_splits[target]:
                         pad_splits[target][finger] = []
                     pad_splits[target][finger].append((path, 0))
@@ -383,15 +588,20 @@ def create_LivDet_splits(
                     pad_splits[target][finger].append((path, 1))
                     pad_splits[f"{target}_samples"] += 1
 
+    for subject, fingers in recog_train_subject_finger_paths.items():
+        target = "train" if subject in train_subjects else "val"
+        for finger, paths in fingers.items():
+            for path in paths:
+                if "Live" in path:
+                    if finger not in recog_splits[target]:
+                        recog_splits[target][finger] = []
+                    recog_splits[target][finger].append(path)
+                    recog_splits[f"{target}_samples"] += 1
+
     for subject, fingers in test_subject_finger_paths.items():
         for finger, paths in fingers.items():
             for path in paths:
                 if "Live" in path:
-                    if finger not in recog_splits["test"]:
-                        recog_splits["test"][finger] = []
-                    recog_splits["test"][finger].append(path)
-                    recog_splits["test_samples"] += 1
-
                     if finger not in pad_splits["test"]:
                         pad_splits["test"][finger] = []
                     pad_splits["test"][finger].append((path, 0))
@@ -402,15 +612,38 @@ def create_LivDet_splits(
                     pad_splits["test"][finger].append((path, 1))
                     pad_splits["test_samples"] += 1
 
+    for subject, fingers in recog_test_subject_finger_paths.items():
+        for finger, paths in fingers.items():
+            for path in paths:
+                if "Live" in path:
+                    if finger not in recog_splits["test"]:
+                        recog_splits["test"][finger] = []
+                    recog_splits["test"][finger].append(path)
+                    recog_splits["test_samples"] += 1
+
+    recog_train_subjects_cnt = len(
+        set(s for s in recog_train_subject_finger_paths.keys() if s in train_subjects)
+    )
+    recog_val_subjects_cnt = len(
+        set(
+            s
+            for s in recog_train_subject_finger_paths.keys()
+            if s not in train_subjects
+        )
+    )
+    recog_test_subjects_cnt = len(recog_test_subject_finger_paths)
+
     recog_splits.update(
         {
-            "train_subjects": n_train,
-            "val_subjects": n_total - n_train,
-            "test_subjects": len(test_subject_finger_paths),
+            "train_subjects": recog_train_subjects_cnt,
+            "val_subjects": recog_val_subjects_cnt,
+            "test_subjects": recog_test_subjects_cnt,
             "train_fingers": len(recog_splits["train"]),
             "val_fingers": len(recog_splits["val"]),
             "test_fingers": len(recog_splits["test"]),
-            "total_subjects": n_total + len(test_subject_finger_paths),
+            "total_subjects": recog_train_subjects_cnt
+            + recog_val_subjects_cnt
+            + recog_test_subjects_cnt,
             "total_fingers": len(recog_splits["train"])
             + len(recog_splits["val"])
             + len(recog_splits["test"]),
@@ -447,15 +680,12 @@ def create_LivDet_splits(
     )
 
     print(
-        "\nPAD:\n"
+        "PAD:\n"
         f"• Train: {pad_splits['train_samples']} samples ({pad_splits['train_subjects']} subjects / {pad_splits['train_fingers']} fingers)\n"
         f"• Val: {pad_splits['val_samples']} samples ({pad_splits['val_subjects']} subjects / {pad_splits['val_fingers']} fingers)\n"
         f"• Test: {pad_splits['test_samples']} samples ({pad_splits['test_subjects']} subjects / {pad_splits['test_fingers']} fingers)\n"
         f"Total: {pad_splits['total_samples']} samples ({pad_splits['total_subjects']} subjects / {pad_splits['total_fingers']} fingers)",
     )
-
-    recog_output_path = os.path.join(data_root, "livdet_recog_splits.json")
-    pad_output_path = os.path.join(data_root, "livdet_pad_splits.json")
 
     os.makedirs(os.path.dirname(recog_output_path), exist_ok=True)
     with open(recog_output_path, "w") as f:
@@ -531,10 +761,13 @@ def unify_recog_splits(split_paths: list, output_path: str = "data/splits.json")
 
 
 def unify_pad_splits(
-    recog_split_paths: list[str],
-    pad_split_paths: list[str],
+    recog_split_paths: Optional[list[str]] = None,
+    pad_split_paths: Optional[list[str]] = None,
     output_path: str = "data/pad_splits.json",
 ):
+    recog_split_paths = recog_split_paths or []
+    pad_split_paths = pad_split_paths or []
+
     print(f"Unifying PAD splits from {recog_split_paths} and {pad_split_paths}")
 
     unified = {
@@ -554,7 +787,7 @@ def unify_pad_splits(
         "total_fingers": 0,
         "total_samples": 0,
     }
-    
+
     for split_path in recog_split_paths:
         with open(split_path, "r") as f:
             splits = json.load(f)
@@ -787,162 +1020,143 @@ if __name__ == "__main__":
         [transforms.Resize((224, 224)), transforms.ToTensor()]
     )
 
-    # data_root = "data/FVC"
-    # output_path = "data/FVC/fvc_splits.json"
-    # create_recog_splits(data_root=data_root, output_path=output_path, split_ratio=[0.6, 0.2, 0.2])
-
-    data_roots = [
-        "CASIA-FSA",
-        "CASIA-FV5",
-        "FVC",
-        "Neurotechnology/CrossMatch",
-        "Neurotechnology/UareU",
-        "PolyU",
-        "SD301a",
-        "SD302",
+    recog_data_roots = [
+        "data/CASIA-FSA",
+        "data/CASIA-FV5",
+        "data/FVC/FVC2000/Db1",
+        "data/FVC/FVC2000/Db2",
+        "data/FVC/FVC2000/Db3",
+        "data/FVC/FVC2000/Db4",
+        "data/FVC/FVC2002/Db1",
+        "data/FVC/FVC2002/Db2",
+        "data/FVC/FVC2002/Db3",
+        "data/FVC/FVC2002/Db4",
+        "data/FVC/FVC2004/Db1",
+        "data/FVC/FVC2004/Db2",
+        "data/FVC/FVC2004/Db3",
+        "data/FVC/FVC2004/Db4",
+        "data/Neurotechnology-CrossMatch",
+        "data/Neurotechnology-UareU",
+        "data/PolyU",
+        "data/SD301",
+        "data/SD302",
     ]
-    output_paths = [
-        "casiafsa",
-        "casiafv5",
-        "fvc",
-        "neurocm",
-        "neurouau",
-        "polyu",
-        "sd301a",
-        "sd302",
-    ]
-    for data_root, output_path in zip(data_roots, output_paths):
+    for root in recog_data_roots:
         create_recog_splits(
-            data_root="data/" + data_root,
-            output_path=f"data/{data_root}/{output_path}_splits.json",
-            split_ratio=[0.6, 0.2, 0.2]
+            data_root=root,
+            output_path=f"{root}/splits.json",
+            split_ratio=(0.6, 0.2, 0.2),
+            min_samples=3,
+            seed=42,
         )
         print()
 
-    unify_recog_splits(
-        split_paths=[
-            "data/CASIA-FSA/casiafsa_splits.json",
-            "data/CASIA-FV5/casiafv5_splits.json",
-            "data/FVC/fvc_splits.json",
-            "data/Neurotechnology/CrossMatch/neurocm_splits.json",
-            "data/Neurotechnology/UareU/neurouau_splits.json",
-            "data/PolyU/polyu_splits.json",
-            "data/SD301a/sd301a_splits.json",
-            "data/SD302/sd302_splits.json",
-        ],
-        output_path="data/splits.json",
+    create_LivDet_splits(
+        data_root="data/LivDet",
+        recog_output_path="data/LivDet/recog_splits.json",
+        pad_output_path="data/LivDet/pad_splits.json",
+        val_ratio=0.3,
+        min_samples=3,
+        seed=42,
     )
     print()
 
-    train_dataset = RecogTrainingDataset(
-        split_path="data/splits.json", transform=transform
-    )
-    print(train_dataset)
-    print()
-
-    val_dataset = RecogEvaluationDataset(
-        split_path="data/splits.json",
-        split="val",
-        n_genuine_impressions=32
-    )
-    print(val_dataset)
-    print()
-
-    unique_val_dataset = UniqueImageDataset(
-        idx_to_path=val_dataset.idx_to_path,
-        transform=transform,
-    )
-    print(f"Number of unique images in val: {len(unique_val_dataset)}")
-    print()
-
-    test_dataset = RecogEvaluationDataset(
-        split_path="data/splits.json",
-        split="test",
-        n_genuine_impressions=32
-    )
-    print(test_dataset)
-    print()
-
-    data_root = "data/LivDet/"
-    create_LivDet_splits(data_root=data_root, val_ratio=0.2, min_samples=2)
-    print()
-
-    unify_pad_splits(
-        recog_split_paths=[
-            "data/CASIA-FSA/casiafsa_splits.json",
-            "data/CASIA-FV5/casiafv5_splits.json",
-            "data/FVC/fvc_splits.json",
-            "data/Neurotechnology/CrossMatch/neurocm_splits.json",
-            "data/Neurotechnology/UareU/neurouau_splits.json",
-            "data/PolyU/polyu_splits.json",
-            "data/SD301a/sd301a_splits.json",
-            "data/SD302/sd302_splits.json",
-        ],
-        pad_split_paths=[
-            "data/LivDet/livdet_pad_splits.json",
-        ],
-        output_path="data/pad_splits.json",
+    create_pad_splits(
+        data_root="data/ATVS-FF",
+        recog_output_path="data/ATVS-FF/recog_splits.json",
+        pad_output_path="data/ATVS-FF/pad_splits.json",
+        split_ratio=(1, 0, 0),
+        min_samples=3,
+        seed=42,
     )
     print()
 
     unify_recog_splits(
         split_paths=[
-            "data/CASIA-FSA/casiafsa_splits.json",
-            "data/CASIA-FV5/casiafv5_splits.json",
-            "data/FVC/fvc_splits.json",
-            "data/Neurotechnology/CrossMatch/neurocm_splits.json",
-            "data/Neurotechnology/UareU/neurouau_splits.json",
-            "data/PolyU/polyu_splits.json",
-            "data/SD301a/sd301a_splits.json",
-            "data/SD302/sd302_splits.json",
-            "data/LivDet/livdet_recog_splits.json",
+            "data/CASIA-FSA/splits.json",
+            "data/CASIA-FV5/splits.json",
+            "data/FVC/FVC2000/Db1/splits.json",
+            "data/FVC/FVC2000/Db2/splits.json",
+            "data/FVC/FVC2000/Db3/splits.json",
+            "data/FVC/FVC2000/Db4/splits.json",
+            "data/FVC/FVC2002/Db1/splits.json",
+            "data/FVC/FVC2002/Db2/splits.json",
+            "data/FVC/FVC2002/Db3/splits.json",
+            "data/FVC/FVC2002/Db4/splits.json",
+            "data/FVC/FVC2004/Db1/splits.json",
+            "data/FVC/FVC2004/Db2/splits.json",
+            "data/FVC/FVC2004/Db3/splits.json",
+            "data/FVC/FVC2004/Db4/splits.json",
+            "data/Neurotechnology-CrossMatch/splits.json",
+            "data/Neurotechnology-UareU/splits.json",
+            "data/PolyU/splits.json",
+            "data/SD301/splits.json",
+            "data/SD302/splits.json",
         ],
         output_path="data/recog_splits.json",
     )
     print()
 
-    train_dataset = PADDataset(
+    unify_pad_splits(
+        pad_split_paths=[
+            "data/LivDet/pad_splits.json",
+            "data/ATVS-FF/pad_splits.json",
+        ],
+        output_path="data/pad_splits.json",
+    )
+    print()
+
+    recog_train_dataset = RecogTrainingDataset(
+        split_path="data/recog_splits.json",
+        transform=transform,
+    )
+    print(recog_train_dataset)
+    print()
+
+    recog_val_dataset = RecogEvaluationDataset(
+        split_path="data/recog_splits.json",
+        split="val",
+        n_genuine_impressions=32,
+        n_impostor_impressions=1,
+        impostor_mode="all",
+        n_impostor_subset=None,
+        seed=42,
+    )
+    print(recog_val_dataset)
+    print()
+
+    recog_test_dataset = RecogEvaluationDataset(
+        split_path="data/recog_splits.json",
+        split="test",
+        n_genuine_impressions=32,
+        n_impostor_impressions=1,
+        impostor_mode="all",
+        n_impostor_subset=None,
+        seed=42,
+    )
+    print(recog_test_dataset)
+    print()
+
+    pad_train_dataset = PADDataset(
         split_path="data/pad_splits.json",
         split="train",
         transform=transform,
     )
-    print(train_dataset)
+    print(pad_train_dataset)
     print()
 
-    val_dataset = PADDataset(
+    pad_val_dataset = PADDataset(
         split_path="data/pad_splits.json",
         split="val",
         transform=transform,
     )
-    print(val_dataset)
+    print(pad_val_dataset)
     print()
 
-    test_dataset = PADDataset(
+    pad_test_dataset = PADDataset(
         split_path="data/pad_splits.json",
         split="test",
         transform=transform,
     )
-    print(test_dataset)
+    print(pad_test_dataset)
     print()
-
-    val_dataset = RecogEvaluationDataset(
-        split_path="data/recog_splits.json",
-        split="val",
-        n_genuine_impressions=32
-    )
-    print(val_dataset)
-    print()
-
-    unique_val_dataset = UniqueImageDataset(
-        idx_to_path=val_dataset.idx_to_path,
-        transform=transform,
-    )
-    print(f"Number of unique images in val: {len(unique_val_dataset)}")
-    print()
-
-    test_dataset = RecogEvaluationDataset(
-        split_path="data/recog_splits.json",
-        split="test",
-        n_genuine_impressions=32
-    )
-    print(test_dataset)

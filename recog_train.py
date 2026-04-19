@@ -6,7 +6,6 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-import wandb
 import yaml
 from sklearn.metrics import roc_curve
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -16,11 +15,16 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
+import wandb
 from data import RecogEvaluationDataset, RecogTrainingDataset, UniqueImageDataset
 from loss import ArcFaceLoss
 from model import ViTUnified
 from schedulers import polynomial_scheduler
 from transforms import get_transforms
+
+# ---------------------------------------------------------------------------
+# DDP Utilities
+# ---------------------------------------------------------------------------
 
 
 def setup_ddp() -> tuple[int, int]:
@@ -50,43 +54,59 @@ def load_config(path: str) -> dict:
         return yaml.safe_load(f)
 
 
+def _unwrap(module):
+    return module.module if isinstance(module, DDP) else module
+
+
+# ---------------------------------------------------------------------------
+# EER Computation
+# ---------------------------------------------------------------------------
+
+
 @torch.no_grad()
-def compute_eer(
-    scores: np.ndarray,
-    labels: np.ndarray,
-) -> tuple[float, float]:
+def compute_eer(scores: np.ndarray, labels: np.ndarray):
     fmr, tar, thrs = roc_curve(labels, scores, pos_label=1)
     fnmr = 1.0 - tar
 
-    asc_idx = np.argsort(thrs)
-    thrs = thrs[asc_idx]
-    fmr = fmr[asc_idx]
-    fnmr = fnmr[asc_idx]
+    diff = fmr - fnmr
+    idx1 = np.where(diff >= 0)[0][0]
+    idx0 = idx1 - 1 if idx1 > 0 else idx1
 
-    diff = np.abs(fmr - fnmr)
-    eer_idx = int(np.argmin(diff))
-    eer = float((fmr[eer_idx] + fnmr[eer_idx]) / 2.0)
-    eer_thr = float(thrs[eer_idx])
+    x0, y0 = fmr[idx0], fnmr[idx0]
+    x1, y1 = fmr[idx1], fnmr[idx1]
 
-    return eer, eer_thr
+    if idx0 == idx1:
+        eer = (x0 + y0) / 2
+        eer_thr = thrs[idx0]
+    else:
+        t = (y0 - x0) / ((x1 - x0) - (y1 - y0))
+        eer = x0 + t * (x1 - x0)
+        eer_thr = thrs[idx0] + t * (thrs[idx1] - thrs[idx0])
+
+    return float(eer), float(eer_thr)
+
+
+# ---------------------------------------------------------------------------
+# Embedding Extraction & Evaluation
+# ---------------------------------------------------------------------------
 
 
 @torch.no_grad()
 def get_embeddings(
-    model: torch.nn.Module,
+    model: ViTUnified,
     val_unique_loader: DataLoader,
     device: torch.device,
     epoch: int,
-):
+) -> torch.Tensor:
     model.eval()
 
-    embed_dim = model.embed_dim
+    embed_dim = _unwrap(model).embed_dim
     n_unique_images = len(val_unique_loader.dataset)
 
     local_embeddings = torch.zeros((n_unique_images, embed_dim), device=device)
     mask = torch.zeros(n_unique_images, device=device, dtype=torch.bool)
 
-    pbar_unique = tqdm(
+    pbar = tqdm(
         val_unique_loader,
         desc=f"Epoch {epoch:03d} [val extract]",
         leave=False,
@@ -94,7 +114,7 @@ def get_embeddings(
         disable=not is_main(),
     )
 
-    for idxs, imgs in pbar_unique:
+    for idxs, imgs in pbar:
         imgs = imgs.to(device, non_blocking=True)
         with torch.autocast(device_type="cuda"):
             emb, _ = model(imgs)
@@ -123,7 +143,7 @@ def evaluate(
 ) -> tuple[float, float]:
     all_scores, all_labels = [], []
 
-    pbar_pairs = tqdm(
+    pbar = tqdm(
         val_loader,
         desc=f"Epoch {epoch:03d} [val evaluate]",
         leave=False,
@@ -131,7 +151,7 @@ def evaluate(
         disable=not is_main(),
     )
 
-    for idx_a, idx_b, labels in pbar_pairs:
+    for idx_a, idx_b, labels in pbar:
         emb_a = global_embeddings[idx_a]
         emb_b = global_embeddings[idx_b]
 
@@ -145,8 +165,9 @@ def evaluate(
     return eer, thr
 
 
-def _unwrap(module):
-    return module.module if isinstance(module, DDP) else module
+# ---------------------------------------------------------------------------
+# Checkpoint Management
+# ---------------------------------------------------------------------------
 
 
 def load_checkpoint(
@@ -170,10 +191,10 @@ def load_checkpoint(
             optimizer.load_state_dict(ckpt_dict["optimizer"])
         if "scheduler" in ckpt_dict:
             scheduler.load_state_dict(ckpt_dict["scheduler"])
-        if "epoch" in ckpt_dict:
-            start_epoch = ckpt_dict["epoch"] + 1
         if "scaler" in ckpt_dict:
             scaler.load_state_dict(ckpt_dict["scaler"])
+        if "epoch" in ckpt_dict:
+            start_epoch = ckpt_dict["epoch"] + 1
         if "eer" in ckpt_dict:
             best_eer = ckpt_dict["eer"]
 
@@ -254,6 +275,11 @@ def save_best(
         tqdm.write("  [wandb] best-model artifact logged")
 
 
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
+
+
 def train_one_epoch(
     model: DDP,
     arcface_loss: DDP,
@@ -294,13 +320,13 @@ def train_one_epoch(
         scaler.scale(loss).backward()
 
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(
-            all_params,
-            max_norm=1.0,
-        )
+        torch.nn.utils.clip_grad_norm_(all_params, max_norm=1.0)
+        old_scale = scaler.get_scale()
         scaler.step(optimizer)
         scaler.update()
-        scheduler.step()
+        new_scale = scaler.get_scale()
+        if new_scale >= old_scale:
+            scheduler.step()
 
         loss_val = loss.item()
         lr_val = scheduler.get_last_lr()[0]
@@ -309,6 +335,11 @@ def train_one_epoch(
         pbar.set_postfix(loss=f"{loss_val:.4f}", lr=f"{lr_val:.2e}")
 
     return total_loss / len(train_loader)
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 
 def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
@@ -332,17 +363,15 @@ def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
     if is_main():
         print(f"Device: {device}  |  world_size: {world_size}")
 
-    # ── Wandb ─────────────────────────────────────────────────
+    # ── Wandb ─────────────────────────────────────────────────────────────
     if is_main() and not no_wandb and wandb_cfg.get("api_key"):
         wandb.login(key=wandb_cfg["api_key"])
-        wandb.init(
-            project=wandb_cfg.get("project", "ViTUnified-Recognition"), config=cfg
-        )
+        wandb.init(project=wandb_cfg.get("project", "DualSwin-Recognition"), config=cfg)
 
-    # ── transforms ──────────────────────────────────────────────────────────
+    # ── Transforms ────────────────────────────────────────────────────────
     train_transform, eval_transform = get_transforms("all")
 
-    # ── datasets ─────────────────────────────────────────────────────────────
+    # ── Datasets ──────────────────────────────────────────────────────────
     train_dataset = RecogTrainingDataset(
         split_path=data_cfg["split_path"],
         transform=train_transform,
@@ -354,7 +383,7 @@ def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
         n_impostor_impressions=data_cfg["n_impostor_impressions"],
         impostor_mode=data_cfg["impostor_mode"],
         n_impostor_subset=None
-        if data_cfg["n_impostor_subset"] in ("None", None)
+        if data_cfg.get("n_impostor_subset") in ("None", None, "null")
         else data_cfg["n_impostor_subset"],
         seed=general_cfg["seed"],
     )
@@ -366,7 +395,7 @@ def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
         print(f"\n{train_dataset}")
         print(f"{val_dataset}")
 
-    # ── dataloaders ───────────────────────────────────────────────────────────
+    # ── Dataloaders ───────────────────────────────────────────────────────
     train_sampler = DistributedSampler(
         train_dataset,
         num_replicas=world_size,
@@ -376,7 +405,7 @@ def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
     )
     train_loader = DataLoader(
         train_dataset,
-        batch_size=training_cfg["batch_size"],
+        batch_size=training_cfg["recog_batch_size"],
         sampler=train_sampler,
         num_workers=training_cfg["num_workers"],
         pin_memory=training_cfg["pin_memory"],
@@ -384,7 +413,7 @@ def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
 
     val_loader = DataLoader(
         val_dataset,
-        batch_size=evaluation_cfg["batch_size"],
+        batch_size=evaluation_cfg["recog_batch_size"],
         shuffle=False,
         num_workers=training_cfg["num_workers"],
         pin_memory=training_cfg["pin_memory"],
@@ -399,13 +428,13 @@ def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
     )
     unique_val_loader = DataLoader(
         unique_val_dataset,
-        batch_size=training_cfg["batch_size"],
+        batch_size=training_cfg["recog_batch_size"],
         sampler=unique_val_sampler,
         num_workers=training_cfg["num_workers"],
         pin_memory=training_cfg["pin_memory"],
     )
 
-    # ── model ─────────────────────────────────────────────────────────────────
+    # ── Model ─────────────────────────────────────────────────────────────
     model = ViTUnified(
         model_name=model_cfg["model_name"],
         pretrained=model_cfg["pretrained"],
@@ -413,22 +442,24 @@ def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
         pad_dropout=model_cfg["pad_dropout"],
     ).to(device)
     model._freeze_pad_heads()
-    if is_main():
-        print("All PAD heads are frozen.")
     model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
-    # ── loss ──────────────────────────────────────────────────────────────────
+    if is_main():
+        n_params = sum(p.numel() for p in model.parameters()) / 1e6
+        print(f"[model] ViTUnified ({n_params:.2f}M params)")
+
+    # ── Loss ──────────────────────────────────────────────────────────────
     n_ids = train_dataset.n_ids
-    embed_dim = _unwrap(model).embed_dim
+    embed_dim_a = _unwrap(model).embed_dim
     arcface_loss = ArcFaceLoss(
-        embed_dim=embed_dim,
+        embed_dim=embed_dim_a,
         num_classes=n_ids,
         margin=loss_cfg["margin"],
         scale=loss_cfg["scale"],
     ).to(device)
     arcface_loss = DDP(arcface_loss, device_ids=[local_rank], output_device=local_rank)
 
-    # ── optimizer & scheduler & scaler ─────────────────────────────────────────────────
+    # ── Optimizer, Scheduler, Scaler ──────────────────────────────────────
     optimizer = AdamW(
         list(model.parameters()) + list(arcface_loss.parameters()),
         lr=opt_cfg["lr"],
@@ -446,7 +477,7 @@ def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
 
     scaler = torch.amp.GradScaler("cuda")
 
-    # ── training loop ─────────────────────────────────────────────────────────
+    # ── Training loop ─────────────────────────────────────────────────────
     start_epoch = 1
     best_eer = float("inf")
 
@@ -462,10 +493,7 @@ def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
         os.makedirs(output_cfg["checkpoint_dir"], exist_ok=True)
 
         print("\n" + "=" * 60)
-        print(
-            f"Starting training  (GPUs: {world_size}  |  "
-            f"effective batch: {training_cfg['batch_size'] * world_size})"
-        )
+        print("Starting recognition training")
         print("=" * 60)
 
     epoch_pbar = tqdm(
@@ -474,6 +502,7 @@ def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
         unit="epoch",
         disable=not is_main(),
     )
+
     for epoch in epoch_pbar:
         avg_loss = train_one_epoch(
             model,
@@ -491,7 +520,7 @@ def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
 
         global_embeddings = get_embeddings(
             _unwrap(model), unique_val_loader, device, epoch
-        )        
+        )
 
         if is_main():
             eer, thr = evaluate(val_loader, global_embeddings, device, epoch)
@@ -570,7 +599,7 @@ def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
             lines_2, labels_2 = ax2.get_legend_handles_labels()
             ax1.legend(lines_1 + lines_2, labels_1 + labels_2, loc="upper right")
 
-            plt.title("Training History")
+            plt.title("Recognition Training History")
             plot_path = os.path.join(
                 output_cfg["checkpoint_dir"], "training_history.png"
             )
@@ -582,11 +611,11 @@ def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Fingerprint Recognition Training")
+    parser = argparse.ArgumentParser(description="ViTUnified Recognition Training")
     parser.add_argument(
         "--config",
         type=str,
-        default="config_recog.yaml",
+        default="recog_config.yaml",
         help="Path to YAML config file",
     )
     parser.add_argument(

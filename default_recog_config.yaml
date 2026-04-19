@@ -2,7 +2,7 @@ general:
   seed: 42
 
 wandb:
-  api_key: ""
+  api_key: null
   project: "ViTUnified-Recognition"
 
 model:
@@ -13,7 +13,7 @@ model:
 
 loss:
   margin: 0.5
-  scale: 30.0
+  scale: 32.0
 
 optimizer:
   lr: 1.0e-4
@@ -25,28 +25,21 @@ scheduler:
 
 training:
   epochs: 80
-  batch_size: 256
+  recog_batch_size: 256
   num_workers: 8
   pin_memory: true
   checkpoint_interval: 20
 
 data:
-  split_path: "data/splits.json"
+  split_path: "data/recog_splits.json"
   n_genuine_impressions: 32
   n_impostor_impressions: 1
   impostor_mode: "all"
-  n_impostor_subset: None
+  n_impostor_subset: null
 
 output:
   checkpoint_dir: "ckpts/recog/"
   best_model_name: "best_model.pth"
 
 evaluation:
-  batch_size: 1024
-  unique_batch_size: 256
-  num_workers: 8
-  pin_memory: true
-  n_genuine_impressions: 32
-  n_impostor_impressions: 1
-  impostor_mode: "all"
-  n_impostor_subset: None
+  recog_batch_size: 1024

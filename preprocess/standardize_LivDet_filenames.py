@@ -260,21 +260,180 @@ def standardize_livdet2011_filenames(input_dir, output_dir=None, dry_run=False):
     print(f"Summary: processed {processed_count} files, skipped {skipped_count} files.")
 
 
-if __name__ == "__main__":
-    livdet2013_dirs = [
-        r"data\LivDet\LivDet2013\Biometrika",
-        r"data\LivDet\LivDet2013\Italdata",
-    ]
-    for dir in livdet2013_dirs:
-        print(f"Standardizing filenames in {dir}")
-        standardize_livdet2013_filenames(dir, None, dry_run=False)
-        print()
+def standardize_livdet2009_filenames(input_dir, output_dir=None, dry_run=False):
+    """
+    Standardize the filenames in LivDet 2009 protocol.
+    Expected pattern: M_N_[1/2].extension
+    where M is the finger id, N is the acquisition number,
+    [1/2] is 1 for 0 seconds, 2 for 5 seconds.
+    Outputs: fingerid_impression.extension
+    """
+    input_path = Path(input_dir)
+    if not input_path.exists() or not input_path.is_dir():
+        print(f"Error: Directory {input_dir} does not exist.")
+        return
 
-    livdet2011_dirs = [
-        r"data\LivDet\LivDet2011\Digital",
-        r"data\LivDet\LivDet2011\Sagem",
-    ]
-    for dir in livdet2011_dirs:
-        print(f"Standardizing filenames in {dir}")
-        standardize_livdet2011_filenames(dir, None, dry_run=False)
-        print()
+    if output_dir:
+        output_path = Path(output_dir)
+        if not dry_run:
+            output_path.mkdir(parents=True, exist_ok=True)
+    else:
+        output_path = input_path
+
+    filepaths = sorted(input_path.rglob("*"))
+    processed_count = 0
+    skipped_count = 0
+
+    counter = defaultdict(int)
+    current_folder = None
+
+    for filepath in filepaths:
+        if not filepath.is_file():
+            continue
+
+        # Reset counter when moving to a new folder
+        if current_folder != filepath.parent:
+            current_folder = filepath.parent
+            counter.clear()
+
+        filename = filepath.name
+        if filename.startswith("."):
+            continue
+
+        match = re.match(r"^([^_]+)_(\d+)_([12])(\.[A-Za-z0-9]+)?$", filename)
+        if not match:
+            print(
+                f"Skipping: {filepath.relative_to(input_path)} (does not match expected pattern)"
+            )
+            skipped_count += 1
+            continue
+
+        finger_id = match.group(1)
+        ext = match.group(4) if match.group(4) else ""
+
+        counter[finger_id] += 1
+        impression = counter[finger_id]
+
+        new_filename = f"{finger_id}_{impression}{ext}"
+
+        rel_dir = filepath.parent.relative_to(input_path)
+
+        if output_dir:
+            out_dir_path = output_path / rel_dir
+            if not dry_run:
+                out_dir_path.mkdir(parents=True, exist_ok=True)
+            new_filepath = out_dir_path / new_filename
+        else:
+            new_filepath = filepath.parent / new_filename
+
+        if not dry_run:
+            if filepath != new_filepath:
+                if output_dir:
+                    shutil.copy2(filepath, new_filepath)
+                else:
+                    if new_filepath.exists():
+                        print(
+                            f"  [!] Warning: {new_filepath.name} already exists! Overwriting."
+                        )
+                    filepath.rename(new_filepath)
+
+        processed_count += 1
+
+    print(f"Summary: processed {processed_count} files, skipped {skipped_count} files.")
+
+
+def standardize_livdet2009_filenames1(input_dir, output_dir=None, dry_run=False):
+    """
+    Standardize the filenames in LivDet time-series format.
+    Expected folder structure: Category / subject_finger_... / (0s.bmp, 2s.bmp, etc)
+    Outputs: subject_finger_impression.extension
+    """
+    input_path = Path(input_dir)
+    if not input_path.exists() or not input_path.is_dir():
+        print(f"Error: Directory {input_dir} does not exist.")
+        return
+
+    if output_dir:
+        output_path = Path(output_dir)
+        if not dry_run:
+            output_path.mkdir(parents=True, exist_ok=True)
+    else:
+        output_path = input_path
+
+    filepaths = sorted(input_path.rglob("*"))
+    processed_count = 0
+    skipped_count = 0
+
+    counter = defaultdict(int)
+    current_folder = None
+
+    for filepath in filepaths:
+        if not filepath.is_file():
+            continue
+
+        filename = filepath.name
+        if filename.startswith("."):
+            continue
+
+        # Reset counter per folder because the user wants [1/2] per folder
+        if current_folder != filepath.parent:
+            current_folder = filepath.parent
+            counter.clear()
+
+        # Check if parent folder matches the expected format subject_finger...
+        parent_folder = filepath.parent.name
+        # Match subject and finger (finger is always R/L followed by a digit), ignore remainder
+        match = re.match(r"^-?(.+?)_+([RL]\d)", parent_folder)
+        if not match:
+            print(
+                f"Skipping: {filepath.relative_to(input_path)} (parent folder '{parent_folder}' does not match expected pattern)"
+            )
+            skipped_count += 1
+            continue
+
+        subject_id = match.group(1).split("_")[0]
+        finger_id = match.group(2)
+        ext = filepath.suffix
+
+        key = f"{subject_id}_{finger_id}"
+        counter[key] += 1
+        impression = counter[key]
+
+        new_filename = f"{subject_id}_{finger_id}_{impression}{ext}"
+
+        # Maintain directory structure
+        rel_dir = filepath.parent.relative_to(input_path)
+
+        if output_dir:
+            out_dir_path = output_path / rel_dir
+            if not dry_run:
+                out_dir_path.mkdir(parents=True, exist_ok=True)
+            new_filepath = out_dir_path / new_filename
+        else:
+            new_filepath = filepath.parent / new_filename
+
+        if not dry_run:
+            if filepath != new_filepath:
+                if output_dir:
+                    shutil.copy2(filepath, new_filepath)
+                else:
+                    if new_filepath.exists():
+                        print(
+                            f"  [!] Warning: {new_filepath.name} already exists! Overwriting."
+                        )
+                    filepath.rename(new_filepath)
+
+        processed_count += 1
+
+    print(f"Summary: processed {processed_count} files, skipped {skipped_count} files.")
+
+
+if __name__ == "__main__":
+    standardize_livdet2009_filenames("/data/LivDet/LivDet2009/Biometrika")
+    standardize_livdet2009_filenames1("/data/LivDet/LivDet2009/CrossMatch")
+    standardize_livdet2009_filenames1("/data/LivDet/LivDet2009/Identix")
+    standardize_livdet2011_filenames("/data/LivDet/LivDet2011/Digital")
+    standardize_livdet2011_filenames("/data/LivDet/LivDet2011/Sagem")
+    standardize_livdet2013_filenames("/data/LivDet/LivDet2013/Biometrika")
+    standardize_livdet2013_filenames("/data/LivDet/LivDet2013/Italdata")
+        

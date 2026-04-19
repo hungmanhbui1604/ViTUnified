@@ -3,8 +3,6 @@ ckpts/
 data/
 results/
 wandb/
-config_recog.yaml
-config_pad.yaml
+joint_config.yaml
+recog_config.yaml
 data.zip
-evaluate_recog.sh
-evaluate_pad.sh
