@@ -593,6 +593,10 @@ def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
         num_classes=model_cfg["num_classes"],
         pad_dropout=model_cfg["pad_dropout"],
     ).to(device)
+    if is_main():
+        print(f"Loading student model from {model_cfg['recog_ckpt']}")
+    student_ckpt = torch.load(model_cfg["recog_ckpt"], map_location="cpu")
+    model.load_state_dict(student_ckpt["model"])
     model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
     if is_main():
@@ -601,9 +605,9 @@ def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
 
     teacher_model = ViTUnified(
         model_name=model_cfg["model_name"],
-        pretrained=False,
+        pretrained=model_cfg["pretrained"],
         num_classes=model_cfg["num_classes"],
-        pad_dropout=0.0,
+        pad_dropout=model_cfg["pad_dropout"],
     ).to(device)
     if is_main():
         print(f"Loading teacher model from {model_cfg['recog_ckpt']}")
