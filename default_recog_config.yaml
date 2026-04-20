@@ -24,7 +24,7 @@ scheduler:
   min_lr: 1.0e-5
 
 training:
-  epochs: 80
+  epochs: 60
   recog_batch_size: 256
   num_workers: 8
   pin_memory: true
