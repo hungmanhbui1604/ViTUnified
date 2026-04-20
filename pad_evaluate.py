@@ -232,7 +232,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--config",
-        default="joint_config.yaml",
+        required=True,
         help="Path to the PAD YAML config",
     )
     parser.add_argument(

@@ -393,23 +393,23 @@ def train_one_epoch(
         pad_images = pad_images.to(device, non_blocking=True)
         pad_labels = pad_labels.to(device, non_blocking=True)
 
+        # Single forward pass: concatenate both batches to avoid
+        # DDP inplace-modification errors on shared backbone buffers
+        combined = torch.cat([recog_images, pad_images], dim=0)
+
         optimizer.zero_grad(set_to_none=True)
 
         with torch.autocast(device_type="cuda"):
             with torch.no_grad():
-                teacher_emb, _ = teacher_model(recog_images)
+                teacher_emb, _ = teacher_model(combined)
 
-            # Single forward pass: concatenate both batches to avoid
-            # DDP inplace-modification errors on shared backbone buffers
-            combined = torch.cat([recog_images, pad_images], dim=0)
             emb_a, emb_b_list = model(combined)
 
             # Split outputs back
             n_recog = recog_images.size(0)
-            recog_emb = emb_a[:n_recog]
 
             # Losses
-            recog_loss = F.mse_loss(recog_emb, teacher_emb)
+            recog_loss = F.mse_loss(emb_a, teacher_emb)
 
             pad_loss = 0.0
             for logits in emb_b_list:
