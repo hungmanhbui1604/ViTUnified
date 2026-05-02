@@ -24,14 +24,13 @@ class PADHead(nn.Module):
 class ViTUnified(nn.Module):
     def __init__(
         self,
-        model_name: str = "vit_small_patch16_224",
         pretrained: bool = True,
         num_classes: int = 2,
         pad_dropout: float = 0.0,
     ):
         super().__init__()
 
-        self.backbone = timm.create_model(model_name, pretrained=pretrained)
+        self.backbone = timm.create_model("vit_small_patch16_224", pretrained=pretrained)
         self.backbone.reset_classifier(0)
 
         self.embed_dim = self.backbone.embed_dim
@@ -70,12 +69,3 @@ class ViTUnified(nn.Module):
         final_embedding = x[:, 0].contiguous()
 
         return final_embedding, pad_outputs
-
-    def feature_extraction(self, x: torch.Tensor) -> torch.Tensor:
-        final_embedding, _ = self.forward(x)
-        return final_embedding
-
-    def _freeze_pad_heads(self):
-        for param in self.pad_heads.parameters():
-            param.requires_grad = False
-        self.pad_heads.eval()

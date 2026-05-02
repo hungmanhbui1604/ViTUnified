@@ -1,44 +1,114 @@
 import numpy as np
-from sklearn.metrics import roc_curve, auc
+from sklearn.metrics import accuracy_score, auc, roc_curve
+
+
+def compute_pad_metrics(labels: np.ndarray, predictions: np.ndarray) -> dict:
+    # APCER
+    spoof_mask = labels == 1
+    apcer = (predictions[spoof_mask] == 0).mean() if spoof_mask.any() else 0.0
+
+    # BPCER
+    live_mask = labels == 0
+    bpcer = (predictions[live_mask] == 1).mean() if live_mask.any() else 0.0
+
+    # ACE & Accuracy
+    ace = (apcer + bpcer) / 2.0
+    accuracy = accuracy_score(labels, predictions)
+
+    return {
+        "accuracy": accuracy,
+        "ace": ace,
+        "apcer": apcer,
+        "bpcer": bpcer,
+    }
+
 
 def compute_recog_metrics(
     scores: np.ndarray,
     labels: np.ndarray,
 ) -> dict:
-    # fmr, fnmr, tar
+    # ROC
     fmr, tar, thrs = roc_curve(labels, scores, pos_label=1)
     fnmr = 1.0 - tar
 
-    asc_idx = np.argsort(thrs)
-    thrs = thrs[asc_idx]
-    fmr = fmr[asc_idx]
-    tar = tar[asc_idx]
-    fnmr = fnmr[asc_idx]
+    # Remove sklearn's artificial first point
+    if len(thrs) > 1 and np.isinf(thrs[0]):
+        fmr = fmr[1:]
+        tar = tar[1:]
+        fnmr = fnmr[1:]
+        thrs = thrs[1:]
 
-    # EER
-    diff = np.abs(fmr - fnmr)
-    eer_idx = int(np.argmin(diff))
-    eer = float((fmr[eer_idx] + fnmr[eer_idx]) / 2.0)
-    eer_thr = float(thrs[eer_idx])
+    # EER (interpolation)
+    diff = fmr - fnmr
+    idx1_candidates = np.where(diff >= 0)[0]
+
+    if len(idx1_candidates) == 0:
+        # fallback: closest point
+        eer_idx = int(np.argmin(np.abs(diff)))
+        eer = (fmr[eer_idx] + fnmr[eer_idx]) / 2.0
+        eer_thr = thrs[eer_idx]
+    else:
+        idx1 = idx1_candidates[0]
+        idx0 = idx1 - 1 if idx1 > 0 else idx1
+
+        x0, y0 = fmr[idx0], fnmr[idx0]
+        x1, y1 = fmr[idx1], fnmr[idx1]
+
+        if idx0 == idx1:
+            eer = (x0 + y0) / 2.0
+            eer_thr = thrs[idx0]
+        else:
+            den = (x1 - x0) - (y1 - y0)
+            if abs(den) < 1e-12:
+                eer = (x0 + y0) / 2.0
+                eer_thr = thrs[idx0]
+            else:
+                t = (y0 - x0) / den
+                eer = x0 + t * (x1 - x0)
+                eer_thr = thrs[idx0] + t * (thrs[idx1] - thrs[idx0])
 
     # AUC
     auc_roc = float(auc(fmr, tar))
 
-    # TAR@FAR
-    tar_at_far = {}
-    for far_target in (0.1, 0.01, 0.001):
-        mask = fmr <= far_target
-        tar_at_far[far_target] = float(tar[mask].max()) if mask.any() else 0.0
+    # TAR@FAR (interpolation)
+    def interp_tar_at_far(target_far: float) -> float:
+        # exact match
+        mask = (fmr == target_far)
+        if mask.any():
+            return float(tar[mask].max())
+
+        idx = np.searchsorted(fmr, target_far, side="right")
+
+        if idx == 0:
+            return float(tar[0])
+        if idx >= len(fmr):
+            return float(tar[-1])
+
+        x0, x1 = fmr[idx - 1], fmr[idx]
+        y0, y1 = tar[idx - 1], tar[idx]
+
+        # avoid division by zero
+        if abs(x1 - x0) < 1e-12:
+            return float(y0)
+
+        t = (target_far - x0) / (x1 - x0)
+        return float(y0 + t * (y1 - y0))
+
+    tar_at_far = {
+        0.1: interp_tar_at_far(0.1),
+        0.01: interp_tar_at_far(0.01),
+        0.001: interp_tar_at_far(0.001),
+    }
 
     return {
+        "eer": float(eer),
+        "eer_threshold": float(eer_thr),
+        "auc": auc_roc,
         "thresholds": thrs.tolist(),
-        "FMR": fmr.tolist(),
-        "FNMR": fnmr.tolist(),
-        "TAR": tar.tolist(),
-        "EER": eer,
-        "EER_threshold": eer_thr,
-        "AUC": auc_roc,
-        "TAR@FAR=0.1": tar_at_far[0.1],
-        "TAR@FAR=0.01": tar_at_far[0.01],
-        "TAR@FAR=0.001": tar_at_far[0.001],
+        "fmr": fmr.tolist(),
+        "tar": tar.tolist(),
+        "fnmr": fnmr.tolist(),
+        "tar_at_far_0.1": tar_at_far[0.1],
+        "tar_at_far_0.01": tar_at_far[0.01],
+        "tar_at_far_0.001": tar_at_far[0.001],
     }

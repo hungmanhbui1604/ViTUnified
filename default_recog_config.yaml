@@ -5,37 +5,40 @@ wandb:
   api_key: null
   project: "ViTUnified-Recognition"
 
-model:
-  model_name: "vit_small_patch16_224"
-  pretrained: true
-  num_classes: 2
-  pad_dropout: 0.0
-
-loss:
-  margin: 0.5
-  scale: 32.0
-
-optimizer:
-  lr: 1.0e-4
-  weight_decay: 2.0e-5
-
-scheduler:
-  power: 3
-  min_lr: 1.0e-5
-
-training:
-  epochs: 60
-  recog_batch_size: 256
-  num_workers: 8
-  pin_memory: true
-  checkpoint_interval: 20
-
 data:
   split_path: "data/recog_splits.json"
   n_genuine_impressions: 32
   n_impostor_impressions: 1
   impostor_mode: "all"
   n_impostor_subset: null
+  transform_name: "vitunified"
+
+training:
+  epochs: 80
+  recog_batch_size: 256
+  num_workers: 8
+  pin_memory: true
+  checkpoint_interval: 20
+
+model:
+  pretrained: true
+  num_classes: 2
+  pad_dropout: 0.0
+  ckpt_path: null
+
+loss:
+  margin: 0.5
+  scale: 32.0
+
+optimizer:
+  opt_name: "adamw"
+  lr: 1.0e-4
+  weight_decay: 2.0e-5
+
+scheduler:
+  sched_name: "polynomial"
+  power: 3
+  min_lr: 1.0e-5
 
 output:
   checkpoint_dir: "ckpts/recog/"

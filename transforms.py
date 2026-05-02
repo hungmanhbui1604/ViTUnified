@@ -1,5 +1,3 @@
-from typing import Tuple
-
 import torchvision.transforms as transforms
 import torchvision.transforms.functional as F
 
@@ -35,14 +33,8 @@ test_transform = transforms.Compose(
 )
 
 
-def get_transforms(
-    phase: str = "all",
-) -> Tuple[transforms.Compose, transforms.Compose] | transforms.Compose:
-    if phase == "all":
-        return train_transform, test_transform
-    elif phase == "train":
-        return train_transform
-    elif phase == "test":
-        return test_transform
-    else:
-        raise ValueError(phase)
+def get_transforms(transform_name: str) -> tuple:
+    if transform_name == "vitunified":
+        return train_transform, test_transform, None
+
+    raise ValueError("Unknown transform_name: " + transform_name)
