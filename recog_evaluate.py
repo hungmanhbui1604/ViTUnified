@@ -132,10 +132,10 @@ def main(args: argparse.Namespace) -> None:
         num_classes=model_cfg["num_classes"],
         pad_dropout=model_cfg["pad_dropout"],
     ).to(device)
-    embed_dim = model_cfg["branch_a_num_classes"]
+    embed_dim = model.embed_dim
     n_params = sum(p.numel() for p in model.parameters()) / 1e6
     print(
-        f"[model] {model_cfg['model_name']} ({n_params:.2f}M params, embed_dim={embed_dim})"
+        f"[model] ViTUnified ({n_params:.2f}M params, embed_dim={embed_dim})"
     )
 
     print(f"Loading checkpoint: {ckpt_path}")

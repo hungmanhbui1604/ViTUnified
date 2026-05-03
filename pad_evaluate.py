@@ -98,7 +98,7 @@ def main(args: argparse.Namespace) -> None:
         pad_dropout=model_cfg["pad_dropout"],
     ).to(device)
     n_params = sum(p.numel() for p in model.parameters()) / 1e6
-    print(f"[model] {model_cfg['model_name']} ({n_params:.2f}M params)")
+    print(f"[model] ViTUnified ({n_params:.2f}M params)")
 
     print(f"Loading checkpoint: {args.checkpoint_path}")
     ckpt = torch.load(args.checkpoint_path, map_location="cpu", weights_only=False)
@@ -113,7 +113,6 @@ def main(args: argparse.Namespace) -> None:
     print("=" * 50)
     print(f"Split path: {args.split_path}")
     print("-" * 50)
-    print(f"Threshold : {metrics['threshold']:.4f}")
     print(f"Accuracy  : {metrics['accuracy']:.2%}")
     print(f"ACE       : {metrics['ace']:.2%}")
     print(f"APCER     : {metrics['apcer']:.2%}")
@@ -124,7 +123,6 @@ def main(args: argparse.Namespace) -> None:
     # ── Save JSON ────────────────────────────────────────────────────────
     results = {
         "split_path": args.split_path,
-        "threshold": metrics["threshold"],
         "accuracy": metrics["accuracy"],
         "ace": metrics["ace"],
         "apcer": metrics["apcer"],
