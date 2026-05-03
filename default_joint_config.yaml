@@ -30,10 +30,12 @@ model:
   teacher_ckpt: "ckpts/recog/best_model.pth"
 
 optimizer:
+  opt_name: "adamw"
   lr: 1.0e-4
   weight_decay: 2.0e-5
 
 scheduler:
+  sched_name: "polynomial"
   power: 3
   min_lr: 1.0e-5
 
