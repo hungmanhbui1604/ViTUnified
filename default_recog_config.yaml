@@ -6,11 +6,14 @@ wandb:
   project: "ViTUnified-Recognition"
 
 data:
-  split_path: "data/recog_splits.json"
+  recog_split_path: "data/recog_splits.json"
+  pad_split_path: "data/pad_splits.json"
   n_genuine_impressions: 32
   n_impostor_impressions: 1
   impostor_mode: "all"
   n_impostor_subset: null
+  gallery_per_id: 1
+  probe_per_id: null
   transform_name: "vitunified"
 
 training:
@@ -45,4 +48,5 @@ output:
   best_model_name: "best_model.pth"
 
 evaluation:
-  recog_batch_size: 1024
+  auth_batch_size: 1024
+  recog_batch_size: 256

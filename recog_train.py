@@ -13,10 +13,10 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
-from data import RecogEvaluationDataset, RecogTrainingDataset, UniqueImageDataset
-from loss import ArcFaceLoss
+from data import AuthenticationEvaluationDataset, RecogTrainingDataset, UniqueFingerprintDataset
+from losses import ArcFaceLoss
 from metrics import compute_recog_metrics
-from model import ViTUnified
+from models import ViTUnified
 from schedulers import get_scheduler
 from transforms import get_transforms
 
@@ -363,7 +363,7 @@ def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
         split_path=data_cfg["split_path"],
         transform=train_transform,
     )
-    val_dataset = RecogEvaluationDataset(
+    val_dataset = AuthenticationEvaluationDataset(
         split_path=data_cfg["split_path"],
         split="val",
         n_genuine_impressions=data_cfg["n_genuine_impressions"],
@@ -372,7 +372,7 @@ def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
         n_impostor_subset=data_cfg["n_impostor_subset"],
         seed=general_cfg["seed"],
     )
-    unique_val_dataset = UniqueImageDataset(
+    unique_val_dataset = UniqueFingerprintDataset(
         idx_to_path=val_dataset.idx_to_path, transform=eval_transform
     )
 
@@ -381,6 +381,9 @@ def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
         print(f"{val_dataset}")
 
     # ── Dataloaders ───────────────────────────────────────────────────────
+    global_batch_size = train_cfg["recog_batch_size"]
+    local_batch_size = max(1, global_batch_size // world_size)
+
     train_sampler = DistributedSampler(
         train_dataset,
         num_replicas=world_size,
@@ -390,7 +393,7 @@ def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
     )
     train_loader = DataLoader(
         train_dataset,
-        batch_size=train_cfg["recog_batch_size"],
+        batch_size=local_batch_size,
         sampler=train_sampler,
         num_workers=train_cfg["num_workers"],
         pin_memory=train_cfg["pin_memory"],
@@ -398,7 +401,7 @@ def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
 
     val_loader = DataLoader(
         val_dataset,
-        batch_size=eval_cfg["recog_batch_size"],
+        batch_size=eval_cfg["auth_batch_size"],
         shuffle=False,
         num_workers=train_cfg["num_workers"],
         pin_memory=train_cfg["pin_memory"],
@@ -413,7 +416,7 @@ def main(cfg: dict, no_wandb: bool = False, checkpoint: str = None) -> None:
     )
     unique_val_loader = DataLoader(
         unique_val_dataset,
-        batch_size=train_cfg["recog_batch_size"],
+        batch_size=local_batch_size,
         sampler=unique_val_sampler,
         num_workers=train_cfg["num_workers"],
         pin_memory=train_cfg["pin_memory"],

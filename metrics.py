@@ -2,18 +2,15 @@ import numpy as np
 from sklearn.metrics import accuracy_score, auc, roc_curve
 
 
-def compute_pad_metrics(labels: np.ndarray, predictions: np.ndarray) -> dict:
-    # APCER
-    spoof_mask = labels == 1
-    apcer = (predictions[spoof_mask] == 0).mean() if spoof_mask.any() else 0.0
-
-    # BPCER
-    live_mask = labels == 0
-    bpcer = (predictions[live_mask] == 1).mean() if live_mask.any() else 0.0
-
-    # ACE & Accuracy
-    ace = (apcer + bpcer) / 2.0
-    accuracy = accuracy_score(labels, predictions)
+def compute_pad_metrics(labels: np.ndarray, preds: np.ndarray) -> dict:
+    tp = np.sum((preds == 1) & (labels == 1))
+    tn = np.sum((preds == 0) & (labels == 0))
+    fp = np.sum((preds == 1) & (labels == 0))
+    fn = np.sum((preds == 0) & (labels == 1))
+    apcer = fn / (fn + tn) if (fn + tn) > 0 else 0
+    bpcer = fp / (fp + tp) if (fp + tp) > 0 else 0
+    ace = (apcer + bpcer) / 2
+    accuracy = accuracy_score(labels, preds)
 
     return {
         "accuracy": accuracy,
@@ -23,7 +20,7 @@ def compute_pad_metrics(labels: np.ndarray, predictions: np.ndarray) -> dict:
     }
 
 
-def compute_recog_metrics(
+def compute_authentication_metrics(
     scores: np.ndarray,
     labels: np.ndarray,
 ) -> dict:
@@ -112,3 +109,23 @@ def compute_recog_metrics(
         "tar_at_far_0.01": tar_at_far[0.01],
         "tar_at_far_0.001": tar_at_far[0.001],
     }
+
+
+def compute_identification_metrics(
+    sim_mat: np.ndarray,
+    probe_labels: np.ndarray,
+    gallery_labels: np.ndarray,
+    top_k: tuple = (1, 5, 10)
+) -> dict:
+    sorted_indices = np.argsort(-sim_mat, axis=1)
+
+    pred_labels = gallery_labels[sorted_indices]
+
+    matches = (pred_labels == probe_labels[:, None])
+
+    metrics = {}
+    for k in top_k:
+        rank_k = matches[:, :k].any(axis=1).mean()
+        metrics[f"rank_{k}"] = float(rank_k)
+
+    return metrics

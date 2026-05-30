@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 from data import PADDataset
 from metrics import compute_pad_metrics
-from model import ViTUnified
+from models import ViTUnified
 from transforms import get_transforms
 
 # ---------------------------------------------------------------------------
@@ -98,7 +98,7 @@ def main(args: argparse.Namespace) -> None:
         pad_dropout=model_cfg["pad_dropout"],
     ).to(device)
     n_params = sum(p.numel() for p in model.parameters()) / 1e6
-    print(f"[model] ViTUnified ({n_params:.2f}M params)")
+    print(f"[model] ({n_params:.2f}M params)")
 
     print(f"Loading checkpoint: {args.checkpoint_path}")
     ckpt = torch.load(args.checkpoint_path, map_location="cpu", weights_only=False)
@@ -110,19 +110,25 @@ def main(args: argparse.Namespace) -> None:
     metrics = compute_pad_metrics(labels, preds)
 
     # ── Report ───────────────────────────────────────────────────────────
+    n_live = sum(1 for (_, label) in dataset.samples if label == 0)
+    n_spoof = len(dataset) - n_live
     print("=" * 50)
     print(f"Split path: {args.split_path}")
+    print("-" * 50)
+    print(f"Total samples: {len(dataset)} (live={n_live}, spoof={n_spoof})")
     print("-" * 50)
     print(f"Accuracy  : {metrics['accuracy']:.2%}")
     print(f"ACE       : {metrics['ace']:.2%}")
     print(f"APCER     : {metrics['apcer']:.2%}")
     print(f"BPCER     : {metrics['bpcer']:.2%}")
-    print("-" * 50)
     print("=" * 50)
 
     # ── Save JSON ────────────────────────────────────────────────────────
-    results = {
+    summary = {
         "split_path": args.split_path,
+        "n_samples": len(dataset),
+        "n_live": n_live,
+        "n_spoof": n_spoof,
         "accuracy": metrics["accuracy"],
         "ace": metrics["ace"],
         "apcer": metrics["apcer"],
@@ -131,7 +137,7 @@ def main(args: argparse.Namespace) -> None:
 
     json_path = os.path.join(args.output_dir, "pad_metrics.json")
     with open(json_path, "w") as f:
-        json.dump(results, f, indent=2)
+        json.dump(summary, f, indent=2)
     print(f"\nResults saved → {json_path}")
 
 
