@@ -196,7 +196,7 @@ def evaluate_pad(
 
         total_loss += loss.item()
 
-        preds = sum(pad_outputs).argmax(dim=1).cpu().numpy()
+        preds = sum(pad_outputs[i] for i in [4, 5, 7, 9]).argmax(dim=1).cpu().numpy()
         all_preds.append(preds)
         all_labels.append(labels.cpu().numpy())
 

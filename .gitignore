@@ -4,6 +4,7 @@ ckpts/
 data/
 results/
 wandb/
+outputs/
 joint_config.yaml
 recog_config.yaml
 data.zip
