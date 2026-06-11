@@ -3,7 +3,7 @@ general:
 
 wandb:
   api_key: null
-  project: "ViTUnified-Recognition"
+  project: "ViTUnified-Joint"
 
 data:
   recog_split_path: "data/recog_splits.json"
@@ -14,24 +14,21 @@ data:
   n_impostor_subset: null
   gallery_per_id: 1
   probe_per_id: null
-  transform_name: "vitunified"
+  transform_name: "vu"
 
 training:
-  epochs: 80
+  epochs: 40
   recog_batch_size: 256
+  pad_batch_size: 128
   num_workers: 8
   pin_memory: true
-  checkpoint_interval: 20
 
 model:
-  pretrained: true
+  pretrained: false
   num_classes: 2
   pad_dropout: 0.0
-  ckpt_path: null
-
-loss:
-  margin: 0.5
-  scale: 32.0
+  ckpt_path: "ckpts/recog/best_model.pth"
+  teacher_ckpt: "ckpts/recog/best_model.pth"
 
 optimizer:
   opt_name: "adamw"
@@ -43,10 +40,15 @@ scheduler:
   power: 3
   min_lr: 1.0e-5
 
+loss:
+  recog_weight: 1.0
+  pad_weight: 1.0
+
 output:
-  checkpoint_dir: "ckpts/recog/"
+  checkpoint_dir: "ckpts/joint/"
   best_model_name: "best_model.pth"
 
 evaluation:
   auth_batch_size: 1024
-  recog_batch_size: 256
+  recog_batch_size: 128
+  pad_batch_size: 128

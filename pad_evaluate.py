@@ -13,10 +13,6 @@ from metrics import compute_pad_metrics
 from models import ViTUnified
 from transforms import get_transforms
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 
 def load_config(path: str) -> dict:
     with open(path, "r") as f:
@@ -74,7 +70,8 @@ def main(args: argparse.Namespace) -> None:
         raise FileNotFoundError(f"Checkpoint not found: {args.checkpoint_path}")
 
     # ── Transforms ───────────────────────────────────────────────────────
-    _, eval_transform, _ = get_transforms(data_cfg["transform_name"])
+    transform = get_transforms(data_cfg["transform_name"])
+    eval_transform = transform["test"]
 
     # ── Dataset ──────────────────────────────────────────────────────────
     dataset = PADDataset(

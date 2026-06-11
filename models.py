@@ -17,7 +17,7 @@ class PADHead(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        cls_token = x[:, 0].contiguous()  # (B, D)
+        cls_token = x[:, 0].contiguous()
         return self.head(cls_token)
 
 
@@ -66,6 +66,6 @@ class ViTUnified(nn.Module):
 
         # Final embedding
         x = self.backbone.norm(x)
-        final_embedding = x[:, 0].contiguous()
+        embedding = x[:, 0].contiguous()
 
-        return final_embedding, pad_outputs
+        return embedding, pad_outputs

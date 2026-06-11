@@ -18,10 +18,6 @@ from metrics import compute_authentication_metrics, compute_identification_metri
 from models import ViTUnified
 from transforms import get_transforms
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 
 def load_config(path: str) -> dict:
     with open(path, "r") as f:
@@ -29,7 +25,7 @@ def load_config(path: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Embedding Extraction & Evaluation
+# Evaluation
 # ---------------------------------------------------------------------------
 
 
@@ -85,7 +81,9 @@ def collect_identification_scores(
     all_indices = []
 
     with torch.no_grad():
-        for imgs, labels, idx in tqdm(loader, desc="Identification Inference", unit="batch"):
+        for imgs, labels, idx in tqdm(
+            loader, desc="Identification Inference", unit="batch"
+        ):
             imgs = imgs.to(device, non_blocking=True)
 
             embs, _ = model(imgs)
@@ -140,7 +138,8 @@ def main(args: argparse.Namespace) -> None:
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
 
     # ── Transforms ───────────────────────────────────────────────────────
-    _, eval_transform, _ = get_transforms(data_cfg["transform_name"])
+    transform = get_transforms(data_cfg["transform_name"])
+    eval_transform = transform["test"]
 
     # ── Datasets ─────────────────────────────────────────────────────────
     authentication_dataset = AuthenticationEvaluationDataset(
@@ -202,9 +201,7 @@ def main(args: argparse.Namespace) -> None:
     ).to(device)
     embed_dim = model.embed_dim
     n_params = sum(p.numel() for p in model.parameters()) / 1e6
-    print(
-        f"[model] ({n_params:.2f}M params, embed_dim={embed_dim})"
-    )
+    print(f"[model] ({n_params:.2f}M params, embed_dim={embed_dim})")
 
     print(f"Loading checkpoint: {ckpt_path}")
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)

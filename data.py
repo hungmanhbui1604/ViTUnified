@@ -1198,7 +1198,6 @@ if __name__ == "__main__":
             "data/LivDet/LivDet2013/Biometrika/pad_splits.json",
             "data/LivDet/LivDet2013/CrossMatch/pad_splits.json",
             "data/LivDet/LivDet2013/Italdata/pad_splits.json",
-            "data/LivDet/LivDet2015/Biometrika/pad_splits.json",
             "data/LivDet/LivDet2015/CrossMatch/pad_splits.json",
             "data/LivDet/LivDet2015/DigitalPersona/pad_splits.json",
             "data/LivDet/LivDet2015/GreenBit/pad_splits.json",
