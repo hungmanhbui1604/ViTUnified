@@ -16,6 +16,8 @@ class ViTUnifiedWrapper(nn.Module):
         return embedding, pad_outputs
 
 def main(args):
+    device = torch.device("cpu")
+
     os.makedirs(args.output_dir, exist_ok=True)
     onnx_path = os.path.join(args.output_dir, args.filename)
 
@@ -30,11 +32,11 @@ def main(args):
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     model.load_state_dict(ckpt["model"])
 
-    model.eval().cuda()
+    model.eval().to(device)
 
-    wrapped_model = ViTUnifiedWrapper(model).eval().cuda()
+    wrapped_model = ViTUnifiedWrapper(model).eval().to(device)
 
-    dummy = torch.randn(1, 3, 224, 224).cuda()
+    dummy = torch.randn(1, 3, 224, 224).to(device)
 
     torch.onnx.export(
         wrapped_model,
